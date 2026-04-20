@@ -93,3 +93,15 @@ Production issuer private keys are never part of the client or submission. Any s
 - all assumptions and residual risks are explicitly documented
 - enhanced deployment options are separated from baseline claims
 - no real production secrets are committed
+
+## Planned Division of Work
+
+All team members will participate in all major aspects of the project, including design discussions, implementation, evaluation, and documentation. To ensure a balanced workload and clear progress, each member will take primary responsibility for specific components:
+
+- **Peiheng Li (pl2978)**: Will lead the threat model design and attack surface analysis. Responsible for defining attacker capabilities, identifying security goals, and constructing the attack-to-mitigation mapping. Will also contribute to system design and implementation.
+- **Yinfeng Chai (yc4669)**: Will lead the system architecture design, including component decomposition, trust boundary definition, and interface specification. Will also participate in threat modeling, implementation planning, and documentation.
+- **Peng Chen (pc3193)**: Will lead the implementation of the Rust license core, including CBOR parsing, signature verification, and policy enforcement logic. Will also contribute to architecture refinement and testing design.
+- **Wenxuan Xu (wx2341)**: Will lead the C host application and integration layer, including the Rust–C ABI interface, build system, and integration testing. Will also contribute to implementation and evaluation.
+- **Xiangyu Liao (xl3581)**: Will lead the evaluation and testing design, including malformed input testing, fuzzing, and microarchitectural risk analysis. Will also contribute to system design and implementation.
+
+Overall, all team members will contribute to design decisions, code development, testing, and documentation, ensuring a balanced and collaborative workflow throughout the project.
