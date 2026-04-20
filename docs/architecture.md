@@ -1,4 +1,4 @@
-<img width="1800" height="1100" alt="License Architecture" src="https://github.com/user-attachments/assets/e9b762ca-9ae4-4dc4-887b-8d4ca6cd3ceb" /># Architecture
+<img width="1800" height="1100" alt="License Architecture" src="https://github.com/user-attachments/assets/e9b762ca-9ae4-4dc4-887b-8d4ca6cd3ceb" />
 
 ## Design Summary
 
