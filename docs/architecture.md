@@ -31,7 +31,6 @@ ALLOW or DENY
         |
         +--> ALLOW: enter protected application path
 ```
-<img width="3600" height="2200" alt="download" src="https://github.com/user-attachments/assets/e222ea18-b359-455c-9e1f-aa646961f2af" />
 
 
 
