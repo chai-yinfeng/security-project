@@ -1,188 +1,202 @@
-<img width="1800" height="1100" alt="License Architecture" src="https://github.com/user-attachments/assets/e9b762ca-9ae4-4dc4-887b-8d4ca6cd3ceb" />
+# Architecture
 
 ## Design Summary
 
-The baseline system uses a Rust license core linked as a static library into a C toy host application. The host application must call the license core before entering the protected application path. The license core parses a canonical CBOR license, verifies an Ed25519 signature with an embedded public trust anchor, evaluates policy, and returns a minimal allow/deny decision through a C ABI.
+The authoritative system model is a **single self-checking Mach-O executable** targeting **macOS on Apple Silicon (ARM64)**. The final protected artifact contains:
 
-The prototype is intentionally portable and software-first. TPM, TEE, OS keychain, measured boot, and code-signing support are documented as enhanced deployment options rather than first-version dependencies.
+- the C host entry layer
+- the Rust enforcement core
+- an embedded signed policy/blob
+- the protected application logic
 
-## High-Level Flow
+The program does not depend on an external license file or an external runtime package input. Instead, the program performs a self-check before entering the protected path.
+
+## Two-Phase System Model
+
+### Phase 1: Build-Time Server
+
+The build-time side is offline and prepares the protected executable for one target device class or one specific target device.
+
+Responsibilities:
+
+- run a profiler on the target Mac
+- collect a composite hardware fingerprint
+- bind that fingerprint to a validity window and policy constraints
+- sign the policy using the offline issuer key
+- embed the signed policy/blob into the final Mach-O read-only image
+
+### Phase 2: Runtime Client
+
+The runtime side is the protected executable itself.
+
+Responsibilities:
+
+- start execution in the C host layer
+- call the Rust core before entering the protected path
+- read the embedded policy/blob from the current executable image
+- query the live runtime environment
+- verify policy authenticity, hardware binding, executable binding, and authorization constraints
+- return `ALLOW` or `DENY`
+
+## Runtime Layer Layout
 
 ```text
-Untrusted license file
+Current Mach-O Executable
         |
         v
-C host application entry wrapper
+C Host Entry
         |
         v
-Rust C ABI boundary
+FFI Boundary
         |
         v
-Rust license core
-  - canonical CBOR parser
-  - Ed25519 verifier
-  - policy engine
-  - fail-closed decision logic
+Embedded Policy Reader
+        |
+        v
+Policy Decoder
+        |
+        v
+Runtime Environment Query
+        |
+        v
+Verification / Binding
+        |
+        v
+Authorization Gate
         |
         v
 ALLOW or DENY
-        |
-        +--> DENY: exit before protected code
-        |
-        +--> ALLOW: enter protected application path
 ```
 
+## Layer Responsibilities
 
+### C Host Entry
 
+- receives control when the program starts
+- invokes the Rust core before protected execution
+- enters the protected application logic only after `ALLOW`
+- does not implement policy parsing, signature checks, or hardware binding logic
 
-## Component Responsibilities
+### FFI Boundary
 
-### C Toy Host
+FFI means Foreign Function Interface. Here it is the language boundary between the C host and the Rust core.
 
-- simulates an application that is compiled together with the license checker
-- receives the license path and product id
-- calls the Rust license core through a stable C ABI
-- exits on deny
-- enters `protected_main()` only after allow
-- contains no license parsing, signature verification, or policy logic
+Responsibilities:
 
-### Rust FFI Boundary
+- define the minimal host-to-core ABI
+- convert host-side calls into Rust-side execution
+- prevent Rust panics from escaping across the boundary
+- collapse production failures into `ALLOW` or `DENY`
 
-- exposes a minimal C ABI to the host
-- treats null pointers, invalid UTF-8, unreadable files, and oversized inputs as deny
-- does not let Rust panics unwind into C
-- does not expose internal parser or crypto errors through the production decision API
-- avoids cross-language heap ownership in the first prototype
+### Embedded Policy Reader
 
-Initial C-facing API:
+- locates and reads the embedded signed policy/blob from the current Mach-O image
+- treats the embedded blob as untrusted input until verified
+- exposes the blob as a structured read target for the Rust core
 
-```c
-typedef enum {
-    LICENSE_DENY = 0,
-    LICENSE_ALLOW = 1
-} license_decision_t;
+### Policy Decoder
 
-license_decision_t license_check_file(
-    const char *license_path,
-    const char *product_id
-);
-```
+- parses the embedded blob into structured claims
+- decodes policy fields without yet trusting them
+- rejects malformed or unsupported policy representations
 
-Optional later API:
+### Runtime Environment Query
 
-```c
-license_decision_t license_check_bytes(
-    const unsigned char *license_buf,
-    unsigned long license_len,
-    const char *product_id
-);
-```
+- queries the live composite hardware fingerprint
+- queries the current wall-clock time
+- checks minimal execution-environment conditions required by policy
 
-### Rust License Core
+Baseline execution-environment checks should include at least:
 
-- decodes and validates canonical CBOR
-- rejects malformed, ambiguous, duplicated, missing, oversized, or non-canonical fields
-- verifies Ed25519 signatures using `ed25519-dalek`
-- checks product id, feature flags, issue time, expiration time, license id, and version
-- returns a short-lived allow/deny result
-- provides richer internal errors only for tests and diagnostics
+- platform and architecture match
+- expected runtime environment shape for macOS ARM64
+- obvious unsupported injection or execution-context states when explicitly chosen by policy
 
-## License Format
+### Verification / Binding
 
-The baseline license format is canonical CBOR. Canonical encoding is required so that the signed payload has one unambiguous byte representation.
+- verifies the policy signature
+- verifies the live hardware fingerprint against the signed hardware binding
+- verifies the protected executable image identity against the signed image binding
+- verifies the integrity coverage of relevant embedded metadata
 
-Minimum fields:
+### Authorization Gate
 
-- `format_version`
-- `license_id`
-- `product_id`
-- `features`
-- `issued_at`
-- `expires_at`
-- `signature_algorithm`
-- `signature`
+- enforces expiration and other runtime policy constraints
+- converts verification and policy results into the final execution decision
 
-Rules:
+## Why the Layering Is Necessary
 
-- `signature_algorithm` is Ed25519 for the baseline.
-- the Ed25519 signature covers the canonical CBOR payload excluding the `signature` field
-- duplicate fields are rejected
-- missing required fields are rejected
-- unknown critical fields are rejected
-- unsupported `format_version` values are rejected
-- field sizes are bounded
-- time fields use a single documented representation
+The layering is a security decision, not just a code organization preference.
 
-Optional future fields:
+- The C host should control only the transition into protected execution.
+- The FFI layer should isolate language-boundary failures from security logic.
+- Policy decoding should stay separate from trust decisions.
+- Runtime environment querying should stay separate from signature verification.
+- Verification should establish truth; authorization should decide permission.
+- The external decision surface should remain narrow so the system fails closed.
 
-- `device_binding`
-- `customer_id`
-- `license_tier`
-- `max_application_version`
-- `revocation_epoch`
-- issuer metadata
+Without these boundaries, self-check logic, environment probing, signature handling, and execution control become intertwined and harder to reason about or test.
 
-Device binding is explicitly not part of the first prototype because local device identifiers are weak without additional platform support.
+## Runtime Execution Flow
 
-## Build and Linking Model
+From the executable's point of view, the runtime path is:
 
-The baseline build uses Cargo for the Rust license core and a Makefile for the top-level build and C host integration.
+1. macOS loads the Mach-O executable.
+2. Execution begins in the C host entry path.
+3. The host calls the Rust core through the ABI.
+4. The Rust core reads the embedded policy/blob from the current executable image.
+5. The Rust core decodes the policy claims.
+6. The Rust core queries the live hardware fingerprint, clock, and minimal execution-environment state.
+7. The Rust core verifies signature, hardware binding, executable binding, and relevant embedded metadata.
+8. The Rust core evaluates time-bound and other policy constraints.
+9. The Rust core returns `ALLOW` or `DENY`.
+10. The host enters the protected path only after `ALLOW`.
 
-Planned layout:
+## Internal Abstract Objects
+
+The recommended internal abstraction chain is:
 
 ```text
-src/license_core/     Rust crate built as a static library
-src/app_integration/  C toy host application
-include/              C ABI header
-scripts/              build, test, and license-generation helpers
-tests/                Rust and integration tests
-eval/                 evaluation harnesses and benchmarks
+CurrentExecutableImage
+    -> EmbeddedPolicyBlob
+    -> PolicyClaims
+    -> RuntimeEnvironmentSnapshot
+    -> VerifiedRuntimeBinding
+    -> AuthorizationDecision
+    -> ALLOW / DENY
 ```
 
-The Rust library is statically linked into the C host for the baseline because the assignment describes a checker compiled together with an application. Dynamic linking is treated as an optional extension and additional attack surface.
+### CurrentExecutableImage
 
-## Error and Logging Policy
+- the loaded Mach-O image that is being protected
 
-- production-facing API returns only allow or deny
-- internal detailed errors are allowed in Rust unit tests
-- logs must not include private issuer material, raw signatures beyond short identifiers, or unnecessary license payload details
-- all unexpected states return deny
-- debug bypasses and environment-variable allow paths are forbidden in release builds
+### EmbeddedPolicyBlob
 
-## Software Attack Defenses
+- the signed structured policy extracted from the executable image
 
-- Rust handles parser, verification, and policy logic
-- C host is kept thin and calls a narrow decision API
-- canonical CBOR avoids ambiguous serialization
-- Ed25519 public-key signatures avoid storing issuer secrets on the client
-- fail-closed behavior is mandatory for every error
-- field sizes and string lengths are bounded
-- compiler hardening and sanitizer builds are used for C integration code
-- tests cover malformed input, tampering, expired licenses, wrong product ids, and FFI misuse
+### PolicyClaims
 
-## Microarchitectural Security Principles
+- decoded, not-yet-trusted policy fields
 
-### Avoid Client-Side High-Value Secrets
+### RuntimeEnvironmentSnapshot
 
-The client stores only the Ed25519 public key. The private signing key never appears in the protected application or license checker. This reduces the impact of timing, cache, or speculative leakage from the client.
+- live composite hardware fingerprint
+- current wall-clock time
+- minimal execution-environment status
 
-### Avoid Secret-Dependent Behavior
+### VerifiedRuntimeBinding
 
-The checker should not use license-controlled or secret values as array indices, pointers, or table selectors. Cryptographic verification is delegated to a reviewed library.
+- policy authenticity established
+- live hardware matched against the signed binding
+- executable identity matched against the signed binding
+- relevant embedded metadata integrity established
 
-### Reduce Authorization Transient Risk
+### AuthorizationDecision
 
-The host should not touch protected data before the allow decision. Architecture-specific speculation barriers at the authorization boundary may be evaluated as an optional mitigation.
+- final decision on whether the protected path may execute
 
-### Treat Rowhammer as Platform-Dependent
+## Product Identity Decision
 
-The baseline prototype will not attempt real Rowhammer exploitation. Instead, it will use fault-injection simulation and analysis to evaluate whether corrupted license bytes or corrupted decision state fail closed. Platform-level Rowhammer mitigations such as ECC, TRR, OS isolation, and memory allocation policy are documented as assumptions or enhanced deployment requirements.
+Production authorization does not depend on caller-supplied `product_id`.
 
-## Enhanced Deployment Options
-
-- OS code signing to make binary patching harder
-- measured boot or TPM-backed attestation to bind execution to an expected binary
-- TEE-based checker isolation
-- OS keychain or platform keystore for deployment-specific secrets
-- remote license validation for revocation or high-value products
-- architecture-specific speculation fences at the decision boundary
+The protected executable is self-describing through the embedded signed policy. Product identity, device identity, time bounds, and executable identity are all part of the signed policy and are not delegated to production caller input.

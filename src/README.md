@@ -1,7 +1,6 @@
 # Source Layout
 
-- `license_core/`: trusted license parsing, verification, and policy logic
-- `app_integration/`: sample application entry points and enforcement wrapper
+- `license_core/`: historical directory name currently used as the placeholder for Rust-side trusted logic ownership notes
+- `app_integration/`: historical directory name currently used as the placeholder for C host-entry ownership notes
 
-Keep the trusted license-checking surface small and auditable.
-
+The final implementation may reorganize source directories after the team freezes module boundaries. Until then, keep the trusted self-checking surface small and auditable.
