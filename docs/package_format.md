@@ -25,6 +25,34 @@ This is not an external runtime package-loader format.
 
 This distinction lets the team reason about format structure without implying a detached runtime package file.
 
+## Expected Mach-O Structure
+```
+final_app_macho
+├── __TEXT
+│   ├── __text
+│   │   ├── C host main / entry wrapper
+│   │   ├── Rust license_check()
+│   │   └── protected application code
+│   ├── __const
+│   │   ├── embedded license blob
+│   │   ├── Ed25519 public key
+│   │   ├── expected checker/payload measurement metadata
+│   │   └── static strings
+│   └── __cstring
+│
+├── __DATA_CONST
+│   ├── GOT / const pointer tables
+│   └── read-mostly runtime metadata
+│
+├── __DATA
+│   ├── mutable globals
+│   └── runtime state
+│
+└── __LINKEDIT
+    ├── symbol/linking metadata
+    └── code signature
+```
+
 ## Logical Embedded Blob Layout
 
 The embedded blob should be described in terms of these logical regions:
