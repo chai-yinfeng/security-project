@@ -94,11 +94,20 @@ Responsibilities:
 - treats the embedded blob as untrusted input until verified
 - exposes the blob as a structured read target for the Rust core
 
+Current implementation note:
+
+- this layer currently uses a temporary `include_bytes!` embedding path rather than Mach-O section lookup
+
 ### Policy Decoder
 
 - parses the embedded blob into structured claims
 - decodes policy fields without yet trusting them
 - rejects malformed or unsupported policy representations
+
+Current implementation note:
+
+- the decoder currently expects a fixed blob layout with `magic + version + cbor_len + canonical_cbor + signature`
+- canonical CBOR is re-encoded and byte-compared during verification
 
 ### Runtime Environment Query
 
@@ -118,6 +127,11 @@ Baseline execution-environment checks should include at least:
 - verifies the live hardware fingerprint against the signed hardware binding
 - verifies the protected executable image identity against the signed image binding
 - verifies the integrity coverage of relevant embedded metadata
+
+Current implementation note:
+
+- executable binding currently hashes the whole current Mach-O image except for the embedded blob and code-signature-related regions
+- richer Mach-O region selection remains future work
 
 ### Authorization Gate
 

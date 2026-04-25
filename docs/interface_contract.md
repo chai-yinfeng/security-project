@@ -14,7 +14,7 @@ typedef enum {
     LICENSE_ALLOW = 1
 } license_decision_t;
 
-license_decision_t license_check_embedded_policy(void);
+license_decision_t license_check(void);
 ```
 
 Production semantics:
@@ -66,6 +66,8 @@ CurrentExecutableImage
 ### EmbeddedPolicyBlob
 
 - the structured signed policy extracted from the current executable image
+- current implementation note: the blob is compiled into the binary via `include_bytes!`
+- planned next step: replace the temporary embedding path with Mach-O section lookup
 
 ### PolicyClaims
 

@@ -20,7 +20,7 @@ Conceptually, the boundary is:
 
 ```text
 C Host Entry
-    -> license_check_embedded_policy()
+    -> license_check()
     -> ALLOW or DENY
 ```
 

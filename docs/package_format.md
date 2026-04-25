@@ -53,68 +53,66 @@ final_app_macho
     └── code signature
 ```
 
-## Logical Embedded Blob Layout
+## Current Implemented Blob Layout
 
-The embedded blob should be described in terms of these logical regions:
+The current implementation uses a compact signed blob with this exact byte layout:
+
+```text
+offset  size  field
+0       4     magic = "SLC1"
+4       2     blob_format_version = 1 (big-endian)
+6       4     policy_cbor_length (big-endian)
+10      N     canonical CBOR policy claims
+10 + N  64    Ed25519 signature over the policy CBOR bytes
+```
+
+Current implementation notes:
+
+- there is no metadata table yet
+- the signature covers the canonical CBOR policy bytes only
+- structural validation currently enforces exact total length matching
+- the implementation is intentionally minimal to keep the demo pipeline stable
+
+## Logical Future Layout
+
+The longer-term embedded blob can still evolve toward these logical regions:
 
 - policy/blob header
 - metadata table or segment table if retained
 - signed manifest or policy claims
 - optional future auxiliary fields
 
-An implementation may choose exact byte-level encoding later, but the semantic layout should remain stable.
+The semantic model stays useful, but the current parser should be documented as the source of truth for the demo.
 
 ## Header Fields
 
-The logical header should expose at least:
+The current header exposes these fields:
 
 - `magic`
 - `blob_format_version`
 - `blob_length`
-- `metadata_offset`
-- `metadata_length`
-- `reserved_or_flags`
 
 Required semantics:
 
 - `magic` identifies the embedded blob format
 - `blob_format_version` selects layout and parsing rules
 - `blob_length` bounds the blob extent
-- `metadata_offset` and `metadata_length` locate any metadata region
-- `reserved_or_flags` must be handled in a forward-compatible way
-
-## Metadata / Segment Fields
-
-If a metadata table or segment table is retained, it should expose at least:
-
-- `entry_kind`
-- `entry_offset`
-- `entry_length`
-- `entry_flags`
-
-Possible logical entry kinds include:
-
-- `POLICY_CLAIMS`
-- `IMAGE_BINDING`
-- `AUX_METADATA`
-- `DEBUG_INFO`
-
-The exact entry set may remain implementation-defined, but the docs must preserve the idea that relevant embedded metadata can be covered by verification.
+- there is currently no metadata table in the shipped blob format
 
 ## Required Policy Claims
 
-The signed policy should include at least:
+The current canonical CBOR policy includes these fields:
 
-- `policy_version`
-- `package_product_id`
-- `device_fingerprint_type`
-- `device_fingerprint_value_or_digest`
-- `issued_at`
-- `expires_at`
-- `protected_image_digest_or_identity`
-- `execenv_constraints`
-- `signature_algorithm`
-- `signature`
+- `schema_version`
+- `product_id`
+- `license_id`
+- `issued_at_unix`
+- `not_before_unix`
+- `not_after_unix`
+- `platform`
+- `device_fingerprint_hash`
+- `executable_hash`
+- `flags`
 
 Additional future claims may be added later, but missing, malformed, duplicated, or unsupported required claims must be rejected.
 
@@ -134,9 +132,11 @@ The docs should not claim that the fingerprint is secret. Leakage of the fingerp
 
 The signed policy must bind not only to hardware and time but also to the protected executable image.
 
-This binding should be represented as:
+This binding is currently represented as:
 
-- `protected_image_digest_or_identity`
+- `executable_hash`
+
+Future documentation may rename this concept at the design level, but `executable_hash` is the current source-of-truth field name.
 
 Its purpose is to detect:
 
@@ -154,6 +154,11 @@ The signed policy may also carry minimal execution-environment constraints, such
 
 These constraints support baseline runtime checks beyond hardware identity and wall-clock time.
 
+Current implementation note:
+
+- `platform.os` and `platform.arch` are implemented today
+- richer execution-environment constraints are deferred
+
 ## Structural Validation Requirements
 
 The embedded blob reader and decoder must reject:
@@ -161,9 +166,10 @@ The embedded blob reader and decoder must reject:
 - wrong magic
 - unsupported format version
 - malformed or inconsistent lengths and offsets
-- malformed metadata layout
-- duplicated or conflicting required fields
-- unsupported reserved or flag usage
+- non-canonical policy CBOR
+- malformed required fields
+
+Future metadata-related validation can be added when the metadata table exists.
 
 ## Verification Coverage Requirements
 
@@ -174,6 +180,26 @@ At minimum, integrity coverage must include:
 - signed policy claims
 - device-binding claims
 - protected executable image identity
-- relevant embedded metadata needed to interpret the blob correctly
+- relevant embedded metadata needed to interpret the blob correctly when that metadata exists
 
 This requirement exists because the system must defend not only against policy tampering, but also against rebinding, relocation, and blob recomposition within the executable image.
+
+## Current Measurement Rule
+
+The current executable binding is a demo-oriented whole-file measurement with explicit exclusions.
+
+The measured bytes are:
+
+- the current Mach-O executable image
+
+The excluded bytes are:
+
+- the embedded signed policy/blob itself
+- the `LC_CODE_SIGNATURE` load command
+- the code signature payload referenced by that load command
+
+This exclusion rule is implemented on both the issuer side and the runtime side so that the current pipeline is stable after patching and re-signing.
+
+Planned next step:
+
+- replace this whole-file approximation with selected Mach-O region measurement

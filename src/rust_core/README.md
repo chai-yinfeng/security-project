@@ -150,18 +150,20 @@ Represents:
 
 - decoded, not-yet-trusted claims from the embedded blob
 
-Expected fields at the design level:
+Current implemented fields:
 
-- `policy_version`
-- `package_product_id`
-- `device_fingerprint_type`
-- `device_fingerprint_value_or_digest`
-- `issued_at`
-- `expires_at`
-- `protected_image_digest_or_identity`
-- `execenv_constraints`
-- `signature_algorithm`
-- `signature`
+- `schema_version`
+- `product_id`
+- `license_id`
+- `issued_at_unix`
+- `not_before_unix`
+- `not_after_unix`
+- `platform`
+- `device_fingerprint_hash`
+- `executable_hash`
+- `flags`
+
+Planned future extensions may add richer execution-environment constraints or metadata coverage, but the list above is the current source-of-truth schema.
 
 ### RuntimeEnvironmentSnapshot
 
