@@ -1,0 +1,296 @@
+#!/usr/bin/env python3
+
+import argparse
+import hashlib
+import os
+import subprocess
+import struct
+import time
+import uuid
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives import serialization
+
+
+MAGIC = b"SLC1"
+BLOB_VERSION = 1
+POLICY_SCHEMA_VERSION = 1
+ZERO_SHA256 = bytes(32)
+MH_MAGIC_64 = 0xFEEDFACF
+LC_CODE_SIGNATURE = 0x1D
+
+
+def sha256_device(raw: str) -> bytes:
+    h = hashlib.sha256()
+    h.update(b"COMS6424_DEVICE_FINGERPRINT_V1")
+    h.update(raw.encode("utf-8"))
+    return h.digest()
+
+
+def sha256_file_measurement(path: str, embedded_blob_path: str | None = None) -> bytes:
+    with open(path, "rb") as f:
+        payload = f.read()
+
+    if embedded_blob_path is not None:
+        with open(embedded_blob_path, "rb") as f:
+            embedded_blob = f.read()
+
+        payload = zero_unique_subsequence(payload, embedded_blob)
+
+    payload = zero_macho_code_signature(payload)
+
+    h = hashlib.sha256()
+    h.update(b"COMS6424_EXECUTABLE_IMAGE_V1")
+    h.update(payload)
+    return h.digest()
+
+
+def zero_unique_subsequence(haystack: bytes, needle: bytes) -> bytes:
+    if not needle:
+        raise ValueError("embedded blob must not be empty")
+
+    first = haystack.find(needle)
+    if first < 0:
+        raise ValueError("embedded blob bytes not found in executable")
+
+    second = haystack.find(needle, first + 1)
+    if second >= 0:
+        raise ValueError("embedded blob bytes found multiple times in executable")
+
+    zeroed = bytearray(haystack)
+    zeroed[first:first + len(needle)] = b"\x00" * len(needle)
+    return bytes(zeroed)
+
+
+def zero_macho_code_signature(payload: bytes) -> bytes:
+    if len(payload) < 32:
+        raise ValueError("Mach-O payload too short")
+
+    magic = struct.unpack_from("<I", payload, 0)[0]
+    if magic != MH_MAGIC_64:
+        raise ValueError("only thin 64-bit Mach-O binaries are supported")
+
+    ncmds = struct.unpack_from("<I", payload, 16)[0]
+    offset = 32
+    patched = bytearray(payload)
+
+    for _ in range(ncmds):
+        if offset + 8 > len(patched):
+            raise ValueError("truncated load command header")
+
+        cmd, cmdsize = struct.unpack_from("<II", patched, offset)
+        if cmdsize < 8 or offset + cmdsize > len(patched):
+            raise ValueError("invalid load command size")
+
+        if cmd == LC_CODE_SIGNATURE:
+            if cmdsize < 16:
+                raise ValueError("invalid LC_CODE_SIGNATURE command")
+
+            dataoff, datasize = struct.unpack_from("<II", patched, offset + 8)
+            end = dataoff + datasize
+            if end > len(patched):
+                raise ValueError("code signature range exceeds file length")
+
+            patched[offset:offset + cmdsize] = b"\x00" * cmdsize
+            patched[dataoff:end] = b"\x00" * datasize
+
+        offset += cmdsize
+
+    return bytes(patched)
+
+
+def query_device_identifier() -> str:
+    output = subprocess.check_output(
+        ["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
+        text=True,
+    )
+
+    for line in output.splitlines():
+        if "IOPlatformUUID" in line:
+            parts = line.split('"')
+            if len(parts) >= 4:
+                return parts[3]
+
+    raise RuntimeError("failed to read IOPlatformUUID from ioreg output")
+
+
+def encode_uint(major_type: int, value: int) -> bytes:
+    if value < 0:
+        raise ValueError("value must be non-negative")
+
+    if value < 24:
+        return bytes([(major_type << 5) | value])
+    if value < 256:
+        return bytes([(major_type << 5) | 24, value])
+    if value < 65536:
+        return bytes([(major_type << 5) | 25]) + struct.pack(">H", value)
+    if value < 2**32:
+        return bytes([(major_type << 5) | 26]) + struct.pack(">I", value)
+    if value < 2**64:
+        return bytes([(major_type << 5) | 27]) + struct.pack(">Q", value)
+
+    raise ValueError("integer too large for this schema")
+
+
+def encode_cbor(value) -> bytes:
+    if isinstance(value, bool):
+        return b"\xf5" if value else b"\xf4"
+
+    if value is None:
+        return b"\xf6"
+
+    if isinstance(value, int):
+        if value >= 0:
+            return encode_uint(0, value)
+        return encode_uint(1, -1 - value)
+
+    if isinstance(value, bytes):
+        return encode_uint(2, len(value)) + value
+
+    if isinstance(value, str):
+        raw = value.encode("utf-8")
+        return encode_uint(3, len(raw)) + raw
+
+    if isinstance(value, (list, tuple)):
+        encoded_items = b"".join(encode_cbor(item) for item in value)
+        return encode_uint(4, len(value)) + encoded_items
+
+    if isinstance(value, dict):
+        encoded_items = []
+
+        for key, item_value in value.items():
+            encoded_key = encode_cbor(key)
+            encoded_value = encode_cbor(item_value)
+            encoded_items.append((encoded_key, encoded_value))
+
+        encoded_items.sort(key=lambda pair: (len(pair[0]), pair[0]))
+
+        payload = b"".join(key + item for key, item in encoded_items)
+        return encode_uint(5, len(value)) + payload
+
+    raise TypeError(f"unsupported CBOR type: {type(value)!r}")
+
+
+def load_or_create_private_key(path: str) -> Ed25519PrivateKey:
+    if os.path.exists(path):
+        with open(path, "rb") as f:
+            raw = f.read()
+
+        return serialization.load_pem_private_key(raw, password=None)
+
+    key = Ed25519PrivateKey.generate()
+
+    pem = key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+
+    with open(path, "wb") as f:
+        f.write(pem)
+
+    return key
+
+
+def write_public_key_rs(private_key: Ed25519PrivateKey, out_path: str):
+    pub = private_key.public_key()
+    raw = pub.public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+
+    arr = ", ".join(f"0x{x:02x}" for x in raw)
+
+    content = f"""pub const ISSUER_PUBLIC_KEY_BYTES: [u8; 32] = [
+    {arr}
+];
+"""
+
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+
+    with open(out_path, "w") as f:
+        f.write(content)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--device-id")
+    parser.add_argument("--product-id", default="coms6424.demo")
+    parser.add_argument("--valid-days", type=int, default=14)
+    parser.add_argument("--private-key", default="artifacts/issuer/issuer_ed25519.pem")
+    parser.add_argument("--executable", required=True)
+    parser.add_argument("--out", default="artifacts/signed_policy/license.bin")
+    parser.add_argument(
+        "--rust-public-key-out",
+        default="src/rust_core/src/issuer_public_key.rs",
+    )
+    parser.add_argument("--embedded-blob-path")
+    parser.add_argument("--executable-hash-hex")
+    parser.add_argument(
+        "--placeholder-executable-hash",
+        action="store_true",
+        help="use 32 zero bytes as the executable measurement",
+    )
+    args = parser.parse_args()
+
+    private_key = load_or_create_private_key(args.private_key)
+    write_public_key_rs(private_key, args.rust_public_key_out)
+
+    now = int(time.time())
+    device_id = args.device_id or query_device_identifier()
+
+    if args.placeholder_executable_hash and args.executable_hash_hex:
+        raise ValueError("choose only one executable hash override mode")
+
+    if args.placeholder_executable_hash:
+        executable_hash = ZERO_SHA256
+    elif args.executable_hash_hex:
+        executable_hash = bytes.fromhex(args.executable_hash_hex)
+        if len(executable_hash) != 32:
+            raise ValueError("executable hash must be exactly 32 bytes")
+    else:
+        executable_hash = sha256_file_measurement(
+            args.executable,
+            embedded_blob_path=args.embedded_blob_path,
+        )
+
+    policy = {
+        "schema_version": POLICY_SCHEMA_VERSION,
+        "product_id": args.product_id,
+        "license_id": uuid.uuid4().bytes,
+        "issued_at_unix": now,
+        "not_before_unix": now,
+        "not_after_unix": now + args.valid_days * 24 * 3600,
+        "platform": {
+            "os": "macos",
+            "arch": "arm64",
+        },
+        "device_fingerprint_hash": sha256_device(device_id),
+        "executable_hash": executable_hash,
+        "flags": 0,
+    }
+
+    policy_cbor = encode_cbor(policy)
+    signature = private_key.sign(policy_cbor)
+
+    blob = MAGIC
+    blob += struct.pack(">H", BLOB_VERSION)
+    blob += struct.pack(">I", len(policy_cbor))
+    blob += policy_cbor
+    blob += signature
+
+    os.makedirs(os.path.dirname(args.out), exist_ok=True)
+
+    with open(args.out, "wb") as f:
+        f.write(blob)
+
+    print(f"wrote {args.out}")
+    print(f"policy_len={len(policy_cbor)}")
+    print(f"signature_len={len(signature)}")
+    print(f"device_id={device_id}")
+    print(f"executable_hash={executable_hash.hex()}")
+
+
+if __name__ == "__main__":
+    main()

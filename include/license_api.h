@@ -1,5 +1,5 @@
-#ifndef PACKAGE_CORE_H
-#define PACKAGE_CORE_H
+#ifndef LICENSE_API_H
+#define LICENSE_API_H
 
 #ifdef __cplusplus
 extern "C" {
@@ -16,7 +16,7 @@ typedef enum {
  * read the embedded signed policy/blob, query the live runtime environment,
  * and return ALLOW or DENY.
  */
-license_decision_t license_check_embedded_policy(void);
+license_decision_t license_check(void);
 
 #ifdef __cplusplus
 }
