@@ -228,3 +228,112 @@ fn read_u32_le(payload: &[u8], offset: usize) -> Result<u32, LicenseError> {
             .map_err(|_| LicenseError::RuntimeEnvironmentFailed)?,
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        LC_CODE_SIGNATURE, MH_MAGIC_64, parse_ioplatform_uuid, zero_macho_code_signature,
+        zero_unique_embedded_blob,
+    };
+    use crate::error::LicenseError;
+
+    #[test]
+    fn parses_ioplatform_uuid_from_ioreg_output() {
+        let sample = r#"
+            | |   "IOPlatformUUID" = "F6860FD3-99A1-5C05-8C2B-946F5F0832FD"
+        "#;
+
+        let parsed = parse_ioplatform_uuid(sample).unwrap();
+
+        assert_eq!(parsed, "F6860FD3-99A1-5C05-8C2B-946F5F0832FD");
+    }
+
+    #[test]
+    fn rejects_ioreg_output_without_uuid() {
+        let sample = r#"
+            | |   "SomeOtherField" = "value"
+        "#;
+
+        let result = parse_ioplatform_uuid(sample);
+
+        assert!(matches!(
+            result,
+            Err(LicenseError::RuntimeEnvironmentFailed)
+        ));
+    }
+
+    #[test]
+    fn zeroes_unique_embedded_blob() {
+        let mut payload = b"prefix-license-suffix".to_vec();
+
+        zero_unique_embedded_blob(&mut payload, b"license").unwrap();
+
+        assert_eq!(&payload, b"prefix-\0\0\0\0\0\0\0-suffix");
+    }
+
+    #[test]
+    fn rejects_missing_embedded_blob() {
+        let mut payload = b"prefix-suffix".to_vec();
+
+        let result = zero_unique_embedded_blob(&mut payload, b"license");
+
+        assert!(matches!(
+            result,
+            Err(LicenseError::RuntimeEnvironmentFailed)
+        ));
+    }
+
+    #[test]
+    fn rejects_multiple_embedded_blob_matches() {
+        let mut payload = b"license-prefix-license-suffix".to_vec();
+
+        let result = zero_unique_embedded_blob(&mut payload, b"license");
+
+        assert!(matches!(
+            result,
+            Err(LicenseError::RuntimeEnvironmentFailed)
+        ));
+    }
+
+    #[test]
+    fn zeroes_code_signature_load_command_and_payload() {
+        let mut macho = synthetic_macho_with_code_signature();
+        let signature_region = 64..72;
+        let load_command_region = 32..48;
+
+        assert!(macho[load_command_region.clone()].iter().any(|&b| b != 0));
+        assert!(macho[signature_region.clone()].iter().any(|&b| b != 0));
+
+        zero_macho_code_signature(&mut macho).unwrap();
+
+        assert!(macho[load_command_region].iter().all(|&b| b == 0));
+        assert!(macho[signature_region].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn rejects_non_macho_payload_for_code_signature_zeroing() {
+        let mut payload = vec![0u8; 64];
+
+        let result = zero_macho_code_signature(&mut payload);
+
+        assert!(matches!(
+            result,
+            Err(LicenseError::RuntimeEnvironmentFailed)
+        ));
+    }
+
+    fn synthetic_macho_with_code_signature() -> Vec<u8> {
+        let mut payload = vec![0u8; 80];
+
+        payload[0..4].copy_from_slice(&MH_MAGIC_64.to_le_bytes());
+        payload[16..20].copy_from_slice(&(1u32).to_le_bytes());
+
+        payload[32..36].copy_from_slice(&LC_CODE_SIGNATURE.to_le_bytes());
+        payload[36..40].copy_from_slice(&(16u32).to_le_bytes());
+        payload[40..44].copy_from_slice(&(64u32).to_le_bytes());
+        payload[44..48].copy_from_slice(&(8u32).to_le_bytes());
+
+        payload[64..72].copy_from_slice(b"SIGBYTES");
+        payload
+    }
+}

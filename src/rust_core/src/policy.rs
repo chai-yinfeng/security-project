@@ -328,3 +328,157 @@ mod bytes_32 {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        PlatformClaims, PolicyClaims, SIGNED_BLOB_MAGIC, SIGNED_BLOB_VERSION,
+        decode_and_check_canonical_policy, decode_signed_policy_blob,
+        to_schema_constrained_canonical_cbor,
+    };
+    use crate::error::LicenseError;
+    use ciborium::value::Value;
+
+    fn sample_claims() -> PolicyClaims {
+        PolicyClaims {
+            schema_version: 1,
+            product_id: "coms6424.demo".into(),
+            license_id: [0x11; 16],
+            issued_at_unix: 1_700_000_000,
+            not_before_unix: 1_700_000_000,
+            not_after_unix: 1_700_086_400,
+            platform: PlatformClaims {
+                os: "macos".into(),
+                arch: "arm64".into(),
+            },
+            device_fingerprint_hash: [0x22; 32],
+            executable_hash: [0x33; 32],
+            flags: 0,
+        }
+    }
+
+    #[test]
+    fn parses_valid_signed_blob() {
+        let policy_cbor = to_schema_constrained_canonical_cbor(&sample_claims()).unwrap();
+        let signature = [0x44u8; 64];
+        let mut blob = Vec::new();
+        blob.extend_from_slice(SIGNED_BLOB_MAGIC);
+        blob.extend_from_slice(&SIGNED_BLOB_VERSION.to_be_bytes());
+        blob.extend_from_slice(&(policy_cbor.len() as u32).to_be_bytes());
+        blob.extend_from_slice(&policy_cbor);
+        blob.extend_from_slice(&signature);
+
+        let parsed = decode_signed_policy_blob(&blob).unwrap();
+
+        assert_eq!(parsed.policy_cbor, policy_cbor.as_slice());
+        assert_eq!(parsed.signature, &signature);
+    }
+
+    #[test]
+    fn rejects_blob_with_wrong_magic() {
+        let policy_cbor = to_schema_constrained_canonical_cbor(&sample_claims()).unwrap();
+        let mut blob = Vec::new();
+        blob.extend_from_slice(b"BAD!");
+        blob.extend_from_slice(&SIGNED_BLOB_VERSION.to_be_bytes());
+        blob.extend_from_slice(&(policy_cbor.len() as u32).to_be_bytes());
+        blob.extend_from_slice(&policy_cbor);
+        blob.extend_from_slice(&[0u8; 64]);
+
+        let result = decode_signed_policy_blob(&blob);
+
+        assert!(matches!(result, Err(LicenseError::InvalidMagic)));
+    }
+
+    #[test]
+    fn rejects_blob_with_wrong_declared_length() {
+        let policy_cbor = to_schema_constrained_canonical_cbor(&sample_claims()).unwrap();
+        let mut blob = Vec::new();
+        blob.extend_from_slice(SIGNED_BLOB_MAGIC);
+        blob.extend_from_slice(&SIGNED_BLOB_VERSION.to_be_bytes());
+        blob.extend_from_slice(&((policy_cbor.len() as u32) + 1).to_be_bytes());
+        blob.extend_from_slice(&policy_cbor);
+        blob.extend_from_slice(&[0u8; 64]);
+
+        let result = decode_signed_policy_blob(&blob);
+
+        assert!(matches!(result, Err(LicenseError::MalformedBlob)));
+    }
+
+    #[test]
+    fn accepts_canonical_policy_encoding() {
+        let claims = sample_claims();
+        let policy_cbor = to_schema_constrained_canonical_cbor(&claims).unwrap();
+
+        let decoded = decode_and_check_canonical_policy(&policy_cbor).unwrap();
+
+        assert_eq!(decoded, claims);
+    }
+
+    #[test]
+    fn rejects_noncanonical_policy_map_ordering() {
+        let claims = sample_claims();
+        let noncanonical = noncanonical_policy_bytes(&claims);
+
+        let result = decode_and_check_canonical_policy(&noncanonical);
+
+        assert!(matches!(result, Err(LicenseError::NonCanonicalPolicy)));
+    }
+
+    fn noncanonical_policy_bytes(claims: &PolicyClaims) -> Vec<u8> {
+        let root = Value::Map(vec![
+            (
+                Value::Text("schema_version".into()),
+                Value::Integer(claims.schema_version.into()),
+            ),
+            (
+                Value::Text("product_id".into()),
+                Value::Text(claims.product_id.clone()),
+            ),
+            (
+                Value::Text("license_id".into()),
+                Value::Bytes(claims.license_id.to_vec()),
+            ),
+            (
+                Value::Text("issued_at_unix".into()),
+                Value::Integer(claims.issued_at_unix.into()),
+            ),
+            (
+                Value::Text("not_before_unix".into()),
+                Value::Integer(claims.not_before_unix.into()),
+            ),
+            (
+                Value::Text("not_after_unix".into()),
+                Value::Integer(claims.not_after_unix.into()),
+            ),
+            (
+                Value::Text("platform".into()),
+                Value::Map(vec![
+                    (
+                        Value::Text("os".into()),
+                        Value::Text(claims.platform.os.clone()),
+                    ),
+                    (
+                        Value::Text("arch".into()),
+                        Value::Text(claims.platform.arch.clone()),
+                    ),
+                ]),
+            ),
+            (
+                Value::Text("flags".into()),
+                Value::Integer(claims.flags.into()),
+            ),
+            (
+                Value::Text("device_fingerprint_hash".into()),
+                Value::Bytes(claims.device_fingerprint_hash.to_vec()),
+            ),
+            (
+                Value::Text("executable_hash".into()),
+                Value::Bytes(claims.executable_hash.to_vec()),
+            ),
+        ]);
+
+        let mut out = Vec::new();
+        ciborium::into_writer(&root, &mut out).unwrap();
+        out
+    }
+}

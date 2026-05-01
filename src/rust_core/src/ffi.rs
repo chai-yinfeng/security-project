@@ -15,7 +15,11 @@ pub enum LicenseDecision {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn license_check() -> LicenseDecision {
-    match std::panic::catch_unwind(|| check_impl()) {
+    collapse_check_result(std::panic::catch_unwind(check_impl))
+}
+
+fn collapse_check_result(result: std::thread::Result<Result<(), LicenseError>>) -> LicenseDecision {
+    match result {
         Ok(Ok(())) => LicenseDecision::Allow,
         _ => LicenseDecision::Deny,
     }
@@ -39,4 +43,35 @@ fn check_impl() -> Result<(), LicenseError> {
     authz::verify_time_window(&claims, &runtime)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LicenseDecision, collapse_check_result};
+    use crate::error::LicenseError;
+
+    #[test]
+    fn returns_allow_for_successful_check() {
+        let decision = collapse_check_result(Ok(Ok(())));
+
+        assert_eq!(decision, LicenseDecision::Allow);
+    }
+
+    #[test]
+    fn returns_deny_for_failed_check() {
+        let decision = collapse_check_result(Ok(Err(LicenseError::SignatureFailed)));
+
+        assert_eq!(decision, LicenseDecision::Deny);
+    }
+
+    #[test]
+    fn returns_deny_for_panicking_check() {
+        let panic_result = std::panic::catch_unwind(|| -> Result<(), LicenseError> {
+            panic!("simulated panic across ffi boundary");
+        });
+
+        let decision = collapse_check_result(panic_result);
+
+        assert_eq!(decision, LicenseDecision::Deny);
+    }
 }
