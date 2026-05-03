@@ -18,6 +18,12 @@ typedef enum {
  */
 license_decision_t license_check(void);
 
+/*
+ * Production entry point. The protected action lives behind the Rust trusted
+ * boundary so the C host no longer owns a standalone allow/deny branch.
+ */
+int licensed_entry(void);
+
 #ifdef __cplusplus
 }
 #endif

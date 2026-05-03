@@ -6,21 +6,27 @@ BIN="$ROOT_DIR/artifacts/bin/license_demo"
 
 "$ROOT_DIR/scripts/build_pipeline.sh" >/tmp/coms6424_pipeline_build.log
 
-python3 - "$BIN" <<'PY'
+python3 - "$ROOT_DIR" "$BIN" <<'PY'
 from pathlib import Path
 import sys
 
-path = Path(sys.argv[1])
+sys.path.insert(0, str(Path(sys.argv[1]) / "scripts"))
+import issue_license
+
+path = Path(sys.argv[2])
 payload = bytearray(path.read_bytes())
 
-marker = b"SLC1"
-offset = payload.find(marker)
-if offset < 0:
-    raise SystemExit("embedded blob marker not found")
+offset, size = issue_license.find_macho_section(
+    bytes(payload),
+    issue_license.LICENSE_SEGMENT,
+    issue_license.LICENSE_SECTION,
+)
+if size < 13:
+    raise SystemExit("embedded license section too small")
 
 payload[offset + 12] ^= 0x01
 path.write_bytes(payload)
-print(f"corrupted {path}")
+print(f"corrupted {path} at Mach-O license section offset {offset}")
 PY
 
 codesign --force --sign - "$BIN" >/tmp/coms6424_tamper_codesign.log

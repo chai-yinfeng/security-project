@@ -38,6 +38,9 @@ pub enum LicenseError {
     #[error("license has expired")]
     Expired,
 
+    #[error("runtime constraint violation")]
+    RuntimeConstraintViolation,
+
     #[error("unsupported platform")]
     UnsupportedPlatform,
 }

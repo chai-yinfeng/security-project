@@ -20,6 +20,8 @@ pub struct PolicyClaims {
     pub device_fingerprint_hash: [u8; 32],
     #[serde(with = "bytes_32")]
     pub executable_hash: [u8; 32],
+    #[serde(default)]
+    pub runtime_constraints: RuntimeConstraints,
     pub flags: u64,
 }
 
@@ -27,6 +29,13 @@ pub struct PolicyClaims {
 pub struct PlatformClaims {
     pub os: String,
     pub arch: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct RuntimeConstraints {
+    pub deny_debugger_attached: bool,
+    pub deny_dyld_environment: bool,
+    pub require_valid_code_signature: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -141,6 +150,23 @@ pub fn to_schema_constrained_canonical_cbor(
         (
             Value::Text("executable_hash".into()),
             Value::Bytes(claims.executable_hash.to_vec()),
+        ),
+        (
+            Value::Text("runtime_constraints".into()),
+            canonical_map(vec![
+                (
+                    Value::Text("deny_debugger_attached".into()),
+                    Value::Bool(claims.runtime_constraints.deny_debugger_attached),
+                ),
+                (
+                    Value::Text("deny_dyld_environment".into()),
+                    Value::Bool(claims.runtime_constraints.deny_dyld_environment),
+                ),
+                (
+                    Value::Text("require_valid_code_signature".into()),
+                    Value::Bool(claims.runtime_constraints.require_valid_code_signature),
+                ),
+            ])?,
         ),
         (
             Value::Text("flags".into()),
@@ -332,7 +358,7 @@ mod bytes_32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        PlatformClaims, PolicyClaims, SIGNED_BLOB_MAGIC, SIGNED_BLOB_VERSION,
+        PlatformClaims, PolicyClaims, RuntimeConstraints, SIGNED_BLOB_MAGIC, SIGNED_BLOB_VERSION,
         decode_and_check_canonical_policy, decode_signed_policy_blob,
         to_schema_constrained_canonical_cbor,
     };
@@ -353,6 +379,11 @@ mod tests {
             },
             device_fingerprint_hash: [0x22; 32],
             executable_hash: [0x33; 32],
+            runtime_constraints: RuntimeConstraints {
+                deny_debugger_attached: true,
+                deny_dyld_environment: true,
+                require_valid_code_signature: true,
+            },
             flags: 0,
         }
     }

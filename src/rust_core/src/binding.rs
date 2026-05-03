@@ -61,7 +61,7 @@ mod tests {
     use super::{verify_device_binding, verify_executable_binding, verify_platform};
     use crate::env::RuntimeEnvironment;
     use crate::error::LicenseError;
-    use crate::policy::{PlatformClaims, PolicyClaims};
+    use crate::policy::{PlatformClaims, PolicyClaims, RuntimeConstraints};
 
     fn sample_claims() -> PolicyClaims {
         PolicyClaims {
@@ -77,6 +77,7 @@ mod tests {
             },
             device_fingerprint_hash: [2u8; 32],
             executable_hash: [3u8; 32],
+            runtime_constraints: RuntimeConstraints::default(),
             flags: 0,
         }
     }
@@ -88,6 +89,9 @@ mod tests {
             now_unix: 150,
             device_fingerprint_hash: [2u8; 32],
             executable_hash: [3u8; 32],
+            debugger_attached: false,
+            dyld_environment_present: false,
+            code_signature_valid: true,
         }
     }
 

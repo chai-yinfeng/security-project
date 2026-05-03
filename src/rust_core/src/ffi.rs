@@ -18,6 +18,17 @@ pub extern "C" fn license_check() -> LicenseDecision {
     collapse_check_result(std::panic::catch_unwind(check_impl))
 }
 
+#[unsafe(no_mangle)]
+pub extern "C" fn licensed_entry() -> i32 {
+    match std::panic::catch_unwind(check_impl) {
+        Ok(Ok(())) => protected_main(),
+        _ => {
+            eprintln!("license denied");
+            1
+        }
+    }
+}
+
 fn collapse_check_result(result: std::thread::Result<Result<(), LicenseError>>) -> LicenseDecision {
     match result {
         Ok(Ok(())) => LicenseDecision::Allow,
@@ -25,22 +36,28 @@ fn collapse_check_result(result: std::thread::Result<Result<(), LicenseError>>) 
     }
 }
 
+fn protected_main() -> i32 {
+    println!("protected path entered");
+    0
+}
+
 fn check_impl() -> Result<(), LicenseError> {
     let blob = embedded::embedded_policy_blob()?;
 
-    let signed_blob = policy::decode_signed_policy_blob(blob)?;
+    let signed_blob = policy::decode_signed_policy_blob(&blob.bytes)?;
 
     crypto::verify_policy_signature(signed_blob.policy_cbor, signed_blob.signature)?;
 
     let claims = policy::decode_and_check_canonical_policy(signed_blob.policy_cbor)?;
 
-    let runtime = env::collect_runtime_environment(blob)?;
+    let runtime = env::collect_runtime_environment()?;
 
     binding::verify_platform(&claims, &runtime)?;
     binding::verify_device_binding(&claims, &runtime)?;
     binding::verify_executable_binding(&claims, &runtime)?;
 
     authz::verify_time_window(&claims, &runtime)?;
+    authz::verify_runtime_constraints(&claims, &runtime)?;
 
     Ok(())
 }

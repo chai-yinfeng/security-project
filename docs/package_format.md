@@ -33,8 +33,9 @@ final_app_macho
 │   │   ├── C host main / entry wrapper
 │   │   ├── Rust license_check()
 │   │   └── protected application code
+│   ├── __license
+│   │   └── embedded signed license blob
 │   ├── __const
-│   │   ├── embedded license blob
 │   │   ├── Ed25519 public key
 │   │   ├── expected checker/payload measurement metadata
 │   │   └── static strings
@@ -71,7 +72,7 @@ Current implementation notes:
 - there is no metadata table yet
 - the signature covers the canonical CBOR policy bytes only
 - structural validation currently enforces exact total length matching
-- the implementation is intentionally minimal to keep the demo pipeline stable
+- the physical Mach-O carrier is the `__TEXT,__license` section
 
 ## Logical Future Layout
 
@@ -112,6 +113,7 @@ The current canonical CBOR policy includes these fields:
 - `platform`
 - `device_fingerprint_hash`
 - `executable_hash`
+- `runtime_constraints`
 - `flags`
 
 Additional future claims may be added later, but missing, malformed, duplicated, or unsupported required claims must be rejected.
@@ -157,7 +159,9 @@ These constraints support baseline runtime checks beyond hardware identity and w
 Current implementation note:
 
 - `platform.os` and `platform.arch` are implemented today
-- richer execution-environment constraints are deferred
+- `runtime_constraints.deny_debugger_attached` checks the macOS traced process flag and keeps a deterministic test hook for automation
+- `runtime_constraints.deny_dyld_environment` rejects common dynamic-loader injection variables
+- `runtime_constraints.require_valid_code_signature` verifies the current executable with `codesign --verify --strict`
 
 ## Structural Validation Requirements
 
@@ -186,20 +190,27 @@ This requirement exists because the system must defend not only against policy t
 
 ## Current Measurement Rule
 
-The current executable binding is a demo-oriented whole-file measurement with explicit exclusions.
+The current executable binding is a selected-section Mach-O measurement.
 
 The measured bytes are:
 
-- the current Mach-O executable image
+- `__TEXT,__text`
+- `__TEXT,__stubs`
+- `__TEXT,__cstring`
+- `__TEXT,__const`
+- `__TEXT,__gcc_except_tab`
+- `__TEXT,__unwind_info`
+- `__TEXT,__eh_frame`
+- selected stable `__DATA_CONST` sections when present
 
-The excluded bytes are:
+The following regions are intentionally not measured:
 
-- the embedded signed policy/blob itself
-- the `LC_CODE_SIGNATURE` load command
-- the code signature payload referenced by that load command
+- `__TEXT,__license`, because the final license is patched after measurement
+- `__LINKEDIT`, because code-signature and linker metadata are expected to change during signing
+- mutable `__DATA` sections
 
-This exclusion rule is implemented on both the issuer side and the runtime side so that the current pipeline is stable after patching and re-signing.
+Issuer-side and runtime-side hashing both use the `COMS6424_EXECUTABLE_IMAGE_V2` domain separator and include each measured section's segment name, section name, byte length, and bytes. This makes the binding stable across section patching and re-signing while still detecting protected text/const/cstring tampering.
 
 Planned next step:
 
-- replace this whole-file approximation with selected Mach-O region measurement
+- add per-section hashes to the signed policy if the project needs more precise diagnostics than the current aggregate `executable_hash`

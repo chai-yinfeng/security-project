@@ -16,7 +16,21 @@ BLOB_VERSION = 1
 POLICY_SCHEMA_VERSION = 1
 ZERO_SHA256 = bytes(32)
 MH_MAGIC_64 = 0xFEEDFACF
+LC_SEGMENT_64 = 0x19
 LC_CODE_SIGNATURE = 0x1D
+LICENSE_SEGMENT = "__TEXT"
+LICENSE_SECTION = "__license"
+MEASURED_SECTIONS = (
+    ("__TEXT", "__text"),
+    ("__TEXT", "__stubs"),
+    ("__TEXT", "__cstring"),
+    ("__TEXT", "__const"),
+    ("__TEXT", "__gcc_except_tab"),
+    ("__TEXT", "__unwind_info"),
+    ("__TEXT", "__eh_frame"),
+    ("__DATA_CONST", "__got"),
+    ("__DATA_CONST", "__const"),
+)
 
 
 def sha256_device(raw: str) -> bytes:
@@ -31,34 +45,29 @@ def sha256_file_measurement(path: str, embedded_blob_path: str | None = None) ->
         payload = f.read()
 
     if embedded_blob_path is not None:
-        with open(embedded_blob_path, "rb") as f:
-            embedded_blob = f.read()
-
-        payload = zero_unique_subsequence(payload, embedded_blob)
-
-    payload = zero_macho_code_signature(payload)
+        # Backward-compatible flag: older callers passed the current blob path.
+        # The physical exclusion is now the Mach-O section that carries it.
+        pass
 
     h = hashlib.sha256()
-    h.update(b"COMS6424_EXECUTABLE_IMAGE_V1")
-    h.update(payload)
+    h.update(b"COMS6424_EXECUTABLE_IMAGE_V2")
+
+    sections = find_macho_sections(payload)
+    for segment, section in MEASURED_SECTIONS:
+        section_info = sections.get((segment, section))
+        if section_info is None:
+            continue
+
+        section_offset, section_size = section_info
+        section_bytes = payload[section_offset:section_offset + section_size]
+        h.update(segment.encode("utf-8"))
+        h.update(b"\x00")
+        h.update(section.encode("utf-8"))
+        h.update(b"\x00")
+        h.update(struct.pack(">Q", len(section_bytes)))
+        h.update(section_bytes)
+
     return h.digest()
-
-
-def zero_unique_subsequence(haystack: bytes, needle: bytes) -> bytes:
-    if not needle:
-        raise ValueError("embedded blob must not be empty")
-
-    first = haystack.find(needle)
-    if first < 0:
-        raise ValueError("embedded blob bytes not found in executable")
-
-    second = haystack.find(needle, first + 1)
-    if second >= 0:
-        raise ValueError("embedded blob bytes found multiple times in executable")
-
-    zeroed = bytearray(haystack)
-    zeroed[first:first + len(needle)] = b"\x00" * len(needle)
-    return bytes(zeroed)
 
 
 def zero_macho_code_signature(payload: bytes) -> bytes:
@@ -96,6 +105,109 @@ def zero_macho_code_signature(payload: bytes) -> bytes:
         offset += cmdsize
 
     return bytes(patched)
+
+
+def zero_macho_license_section(payload: bytes) -> bytes:
+    section_offset, section_size = find_macho_section(
+        payload,
+        LICENSE_SEGMENT,
+        LICENSE_SECTION,
+    )
+    patched = bytearray(payload)
+    patched[section_offset:section_offset + section_size] = b"\x00" * section_size
+    return bytes(patched)
+
+
+def patch_macho_license_section(executable_path: str, blob_path: str):
+    with open(executable_path, "rb") as f:
+        payload = bytearray(f.read())
+    with open(blob_path, "rb") as f:
+        blob = f.read()
+
+    section_offset, section_size = find_macho_section(
+        bytes(payload),
+        LICENSE_SEGMENT,
+        LICENSE_SECTION,
+    )
+
+    if len(blob) != section_size:
+        raise ValueError(
+            f"license blob length {len(blob)} does not match "
+            f"Mach-O section size {section_size}"
+        )
+
+    payload[section_offset:section_offset + section_size] = blob
+
+    with open(executable_path, "wb") as f:
+        f.write(payload)
+
+    print(
+        f"patched {executable_path} "
+        f"{LICENSE_SEGMENT},{LICENSE_SECTION} at file offset {section_offset}"
+    )
+
+
+def find_macho_section(payload: bytes, segment_name: str, section_name: str) -> tuple[int, int]:
+    try:
+        return find_macho_sections(payload)[(segment_name, section_name)]
+    except KeyError:
+        raise ValueError(f"Mach-O section {segment_name},{section_name} not found")
+
+
+def find_macho_sections(payload: bytes) -> dict[tuple[str, str], tuple[int, int]]:
+    if len(payload) < 32:
+        raise ValueError("Mach-O payload too short")
+
+    magic = struct.unpack_from("<I", payload, 0)[0]
+    if magic != MH_MAGIC_64:
+        raise ValueError("only thin 64-bit Mach-O binaries are supported")
+
+    ncmds = struct.unpack_from("<I", payload, 16)[0]
+    offset = 32
+    sections = {}
+
+    for _ in range(ncmds):
+        if offset + 8 > len(payload):
+            raise ValueError("truncated load command header")
+
+        cmd, cmdsize = struct.unpack_from("<II", payload, offset)
+        if cmdsize < 8 or offset + cmdsize > len(payload):
+            raise ValueError("invalid load command size")
+
+        if cmd == LC_SEGMENT_64:
+            if cmdsize < 72:
+                raise ValueError("invalid LC_SEGMENT_64 command")
+
+            segname = read_fixed_name(payload, offset + 8)
+            nsects = struct.unpack_from("<I", payload, offset + 64)[0]
+            section_offset = offset + 72
+
+            for _ in range(nsects):
+                if section_offset + 80 > offset + cmdsize:
+                    raise ValueError("section header exceeds LC_SEGMENT_64 command")
+
+                sectname = read_fixed_name(payload, section_offset)
+                section_segname = read_fixed_name(payload, section_offset + 16)
+                if section_segname != segname:
+                    raise ValueError("section segment name does not match parent segment")
+
+                section_size = struct.unpack_from("<Q", payload, section_offset + 40)[0]
+                file_offset = struct.unpack_from("<I", payload, section_offset + 48)[0]
+                end = file_offset + section_size
+                if end > len(payload):
+                    raise ValueError("section range exceeds file length")
+                sections[(section_segname, sectname)] = (file_offset, section_size)
+
+                section_offset += 80
+
+        offset += cmdsize
+
+    return sections
+
+
+def read_fixed_name(payload: bytes, offset: int) -> str:
+    raw = payload[offset:offset + 16]
+    return raw.split(b"\x00", 1)[0].decode("utf-8")
 
 
 def query_device_identifier() -> str:
@@ -228,6 +340,11 @@ def main():
     parser.add_argument("--embedded-blob-path")
     parser.add_argument("--executable-hash-hex")
     parser.add_argument(
+        "--patch-macho-license-section",
+        action="store_true",
+        help=f"write --out into the {LICENSE_SEGMENT},{LICENSE_SECTION} Mach-O section",
+    )
+    parser.add_argument(
         "--placeholder-executable-hash",
         action="store_true",
         help="use 32 zero bytes as the executable measurement",
@@ -268,6 +385,11 @@ def main():
         },
         "device_fingerprint_hash": sha256_device(device_id),
         "executable_hash": executable_hash,
+        "runtime_constraints": {
+            "deny_debugger_attached": True,
+            "deny_dyld_environment": True,
+            "require_valid_code_signature": True,
+        },
         "flags": 0,
     }
 
@@ -290,6 +412,9 @@ def main():
     print(f"signature_len={len(signature)}")
     print(f"device_id={device_id}")
     print(f"executable_hash={executable_hash.hex()}")
+
+    if args.patch_macho_license_section:
+        patch_macho_license_section(args.executable, args.out)
 
 
 if __name__ == "__main__":

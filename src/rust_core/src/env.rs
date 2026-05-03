@@ -1,10 +1,8 @@
 use crate::error::LicenseError;
+use crate::measurement;
 use sha2::{Digest, Sha256};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
-
-const MH_MAGIC_64: u32 = 0xFEEDFACF;
-const LC_CODE_SIGNATURE: u32 = 0x1D;
 
 #[derive(Debug, Clone)]
 pub struct RuntimeEnvironment {
@@ -13,11 +11,12 @@ pub struct RuntimeEnvironment {
     pub now_unix: u64,
     pub device_fingerprint_hash: [u8; 32],
     pub executable_hash: [u8; 32],
+    pub debugger_attached: bool,
+    pub dyld_environment_present: bool,
+    pub code_signature_valid: bool,
 }
 
-pub fn collect_runtime_environment(
-    embedded_blob: &[u8],
-) -> Result<RuntimeEnvironment, LicenseError> {
+pub fn collect_runtime_environment() -> Result<RuntimeEnvironment, LicenseError> {
     let os = current_os();
     let arch = current_arch();
 
@@ -29,7 +28,10 @@ pub fn collect_runtime_environment(
     let raw_device_id = query_device_identifier()?;
     let device_fingerprint_hash = hash_device_identifier(&raw_device_id);
 
-    let executable_hash = hash_current_executable(embedded_blob)?;
+    let executable_hash = hash_current_executable()?;
+    let debugger_attached = debugger_attached();
+    let dyld_environment_present = dyld_environment_present();
+    let code_signature_valid = verify_current_executable_code_signature()?;
 
     Ok(RuntimeEnvironment {
         os,
@@ -37,6 +39,9 @@ pub fn collect_runtime_environment(
         now_unix,
         device_fingerprint_hash,
         executable_hash,
+        debugger_attached,
+        dyld_environment_present,
+        code_signature_valid,
     })
 }
 
@@ -122,119 +127,78 @@ fn hash_device_identifier(raw: &str) -> [u8; 32] {
 /// - embedded license section
 /// - code signature
 /// - mutable data
-pub fn hash_current_executable(embedded_blob: &[u8]) -> Result<[u8; 32], LicenseError> {
+pub fn hash_current_executable() -> Result<[u8; 32], LicenseError> {
     let path = std::env::current_exe().map_err(|_| LicenseError::RuntimeEnvironmentFailed)?;
-
-    let mut bytes = std::fs::read(path).map_err(|_| LicenseError::RuntimeEnvironmentFailed)?;
-
-    zero_unique_embedded_blob(&mut bytes, embedded_blob)?;
-    zero_macho_code_signature(&mut bytes)?;
-
-    let mut hasher = Sha256::new();
-
-    hasher.update(b"COMS6424_EXECUTABLE_IMAGE_V1");
-    hasher.update(&bytes);
-
-    Ok(hasher.finalize().into())
+    let bytes = std::fs::read(path).map_err(|_| LicenseError::RuntimeEnvironmentFailed)?;
+    measurement::hash_executable_image(&bytes)
 }
 
-fn zero_unique_embedded_blob(haystack: &mut [u8], needle: &[u8]) -> Result<(), LicenseError> {
-    if needle.is_empty() {
-        return Err(LicenseError::RuntimeEnvironmentFailed);
+fn debugger_attached() -> bool {
+    if std::env::var_os("COMS6424_SIMULATE_DEBUGGER").is_some() {
+        return true;
     }
 
-    let Some(first) = find_subslice(haystack, needle) else {
-        return Err(LicenseError::RuntimeEnvironmentFailed);
-    };
+    #[cfg(target_os = "macos")]
+    {
+        const P_TRACED: u32 = 0x0000_0800;
 
-    if find_subslice(&haystack[first + 1..], needle).is_some() {
-        return Err(LicenseError::RuntimeEnvironmentFailed);
-    }
+        let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+        let info_size = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
+        let result = unsafe {
+            libc::proc_pidinfo(
+                libc::getpid(),
+                libc::PROC_PIDTBSDINFO,
+                0,
+                info.as_mut_ptr().cast(),
+                info_size,
+            )
+        };
 
-    let end = first + needle.len();
-    haystack[first..end].fill(0);
-    Ok(())
-}
-
-fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
-}
-
-fn zero_macho_code_signature(payload: &mut [u8]) -> Result<(), LicenseError> {
-    if payload.len() < 32 {
-        return Err(LicenseError::RuntimeEnvironmentFailed);
-    }
-
-    if read_u32_le(payload, 0)? != MH_MAGIC_64 {
-        return Err(LicenseError::RuntimeEnvironmentFailed);
-    }
-
-    let ncmds = read_u32_le(payload, 16)? as usize;
-    let mut offset = 32usize;
-
-    for _ in 0..ncmds {
-        let cmd = read_u32_le(payload, offset)?;
-        let cmdsize = read_u32_le(payload, offset + 4)? as usize;
-
-        if cmdsize < 8 {
-            return Err(LicenseError::RuntimeEnvironmentFailed);
+        if result == info_size {
+            let info = unsafe { info.assume_init() };
+            return (info.pbi_flags & P_TRACED) != 0;
         }
-
-        let end = offset
-            .checked_add(cmdsize)
-            .ok_or(LicenseError::RuntimeEnvironmentFailed)?;
-        if end > payload.len() {
-            return Err(LicenseError::RuntimeEnvironmentFailed);
-        }
-
-        if cmd == LC_CODE_SIGNATURE {
-            if cmdsize < 16 {
-                return Err(LicenseError::RuntimeEnvironmentFailed);
-            }
-
-            let dataoff = read_u32_le(payload, offset + 8)? as usize;
-            let datasize = read_u32_le(payload, offset + 12)? as usize;
-            let sig_end = dataoff
-                .checked_add(datasize)
-                .ok_or(LicenseError::RuntimeEnvironmentFailed)?;
-
-            if sig_end > payload.len() {
-                return Err(LicenseError::RuntimeEnvironmentFailed);
-            }
-
-            payload[offset..end].fill(0);
-            payload[dataoff..sig_end].fill(0);
-        }
-
-        offset = end;
     }
 
-    Ok(())
+    false
 }
 
-fn read_u32_le(payload: &[u8], offset: usize) -> Result<u32, LicenseError> {
-    let end = offset
-        .checked_add(4)
-        .ok_or(LicenseError::RuntimeEnvironmentFailed)?;
-    let bytes = payload
-        .get(offset..end)
-        .ok_or(LicenseError::RuntimeEnvironmentFailed)?;
+fn dyld_environment_present() -> bool {
+    const DYLD_ENV_KEYS: &[&str] = &[
+        "DYLD_INSERT_LIBRARIES",
+        "DYLD_LIBRARY_PATH",
+        "DYLD_FRAMEWORK_PATH",
+        "DYLD_FALLBACK_LIBRARY_PATH",
+        "DYLD_FALLBACK_FRAMEWORK_PATH",
+    ];
 
-    Ok(u32::from_le_bytes(
-        bytes
-            .try_into()
-            .map_err(|_| LicenseError::RuntimeEnvironmentFailed)?,
-    ))
+    DYLD_ENV_KEYS
+        .iter()
+        .any(|key| std::env::var_os(key).is_some())
+}
+
+fn verify_current_executable_code_signature() -> Result<bool, LicenseError> {
+    #[cfg(target_os = "macos")]
+    {
+        let path = std::env::current_exe().map_err(|_| LicenseError::RuntimeEnvironmentFailed)?;
+        let status = Command::new("/usr/bin/codesign")
+            .args(["--verify", "--strict"])
+            .arg(path)
+            .status()
+            .map_err(|_| LicenseError::RuntimeEnvironmentFailed)?;
+
+        Ok(status.success())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(false)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        LC_CODE_SIGNATURE, MH_MAGIC_64, parse_ioplatform_uuid, zero_macho_code_signature,
-        zero_unique_embedded_blob,
-    };
+    use super::parse_ioplatform_uuid;
     use crate::error::LicenseError;
 
     #[test]
@@ -260,80 +224,5 @@ mod tests {
             result,
             Err(LicenseError::RuntimeEnvironmentFailed)
         ));
-    }
-
-    #[test]
-    fn zeroes_unique_embedded_blob() {
-        let mut payload = b"prefix-license-suffix".to_vec();
-
-        zero_unique_embedded_blob(&mut payload, b"license").unwrap();
-
-        assert_eq!(&payload, b"prefix-\0\0\0\0\0\0\0-suffix");
-    }
-
-    #[test]
-    fn rejects_missing_embedded_blob() {
-        let mut payload = b"prefix-suffix".to_vec();
-
-        let result = zero_unique_embedded_blob(&mut payload, b"license");
-
-        assert!(matches!(
-            result,
-            Err(LicenseError::RuntimeEnvironmentFailed)
-        ));
-    }
-
-    #[test]
-    fn rejects_multiple_embedded_blob_matches() {
-        let mut payload = b"license-prefix-license-suffix".to_vec();
-
-        let result = zero_unique_embedded_blob(&mut payload, b"license");
-
-        assert!(matches!(
-            result,
-            Err(LicenseError::RuntimeEnvironmentFailed)
-        ));
-    }
-
-    #[test]
-    fn zeroes_code_signature_load_command_and_payload() {
-        let mut macho = synthetic_macho_with_code_signature();
-        let signature_region = 64..72;
-        let load_command_region = 32..48;
-
-        assert!(macho[load_command_region.clone()].iter().any(|&b| b != 0));
-        assert!(macho[signature_region.clone()].iter().any(|&b| b != 0));
-
-        zero_macho_code_signature(&mut macho).unwrap();
-
-        assert!(macho[load_command_region].iter().all(|&b| b == 0));
-        assert!(macho[signature_region].iter().all(|&b| b == 0));
-    }
-
-    #[test]
-    fn rejects_non_macho_payload_for_code_signature_zeroing() {
-        let mut payload = vec![0u8; 64];
-
-        let result = zero_macho_code_signature(&mut payload);
-
-        assert!(matches!(
-            result,
-            Err(LicenseError::RuntimeEnvironmentFailed)
-        ));
-    }
-
-    fn synthetic_macho_with_code_signature() -> Vec<u8> {
-        let mut payload = vec![0u8; 80];
-
-        payload[0..4].copy_from_slice(&MH_MAGIC_64.to_le_bytes());
-        payload[16..20].copy_from_slice(&(1u32).to_le_bytes());
-
-        payload[32..36].copy_from_slice(&LC_CODE_SIGNATURE.to_le_bytes());
-        payload[36..40].copy_from_slice(&(16u32).to_le_bytes());
-        payload[40..44].copy_from_slice(&(64u32).to_le_bytes());
-        payload[44..48].copy_from_slice(&(8u32).to_le_bytes());
-
-        payload[64..72].copy_from_slice(b"SIGBYTES");
-        payload
     }
 }
