@@ -10,4 +10,4 @@ mod macho;
 mod measurement;
 mod policy;
 
-pub use ffi::license_check;
+pub use ffi::{license_check, licensed_entry};
