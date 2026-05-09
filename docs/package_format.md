@@ -131,6 +131,14 @@ The composite fingerprint should be:
 
 The docs should not claim that the fingerprint is secret. Leakage of the fingerprint alone must not be sufficient to authorize execution.
 
+Payload capability derivation now also uses a per-product 256-bit device secret stored in macOS Keychain. The runtime derives device payload key material from:
+
+- the Keychain secret
+- the public device identifier
+- `product_id`
+
+The `COMS6424_DEVICE_KEY_HEX` environment variable is only a deterministic automation override for tests.
+
 ## Protected Executable Binding
 
 The signed policy must bind not only to hardware and time but also to the protected executable image.
@@ -157,11 +165,22 @@ The signed policy may carry encrypted protected payload blocks. The current impl
 
 Each block contains:
 
+- `payload_schema_version`
 - `block_id`
+- `nonce`
 - `ciphertext`
-- `tag`
 
-The issuer encrypts these blocks after deriving a session capability from the product id, license id, device payload key material, and executable hash. Runtime verification must succeed before Rust can derive the same capability and decrypt blocks in order. The block key derivation includes a mutable use counter, so the capability is consumed progressively instead of acting like a static boolean.
+The `ciphertext` field is the ChaCha20-Poly1305 ciphertext with the authentication tag appended by the AEAD implementation.
+
+The issuer encrypts these blocks after deriving a session capability with HKDF-SHA256 from the product id, license id, Keychain-backed device payload key material, and executable hash. Runtime verification must succeed before Rust can derive the same capability and decrypt blocks in order.
+
+Block keys are plaintext-chain dependent:
+
+- block 1 key uses the initial chain hash
+- block 2 key uses a chain hash that commits to block 1 plaintext
+- block 3 key uses a chain hash that commits to block 2 plaintext
+
+Associated data binds the AEAD operation to `schema_version`, `payload_schema_version`, `product_id`, `license_id`, `executable_hash`, `block_id`, and the current chain hash. Reordering, skipping, copying, or rebinding blocks causes AEAD authentication failure.
 
 This is intentionally data/rules/template encryption rather than dynamic native-code decryption. It prevents straightforward static recovery of the protected output and sealed rules while avoiding the complexity of writable/executable memory, instruction cache management, and macOS code-signing conflicts.
 

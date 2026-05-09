@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub const SIGNED_BLOB_MAGIC: &[u8; 4] = b"SLC1";
 pub const SIGNED_BLOB_VERSION: u16 = 1;
 pub const POLICY_SCHEMA_VERSION: u16 = 1;
+pub const PAYLOAD_SCHEMA_VERSION: u16 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PolicyClaims {
@@ -42,11 +43,12 @@ pub struct RuntimeConstraints {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProtectedPayloadBlock {
+    pub payload_schema_version: u16,
     pub block_id: u64,
+    #[serde(with = "bytes_12")]
+    pub nonce: [u8; 12],
     #[serde(with = "bytes_vec")]
     pub ciphertext: Vec<u8>,
-    #[serde(with = "bytes_32")]
-    pub tag: [u8; 32],
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -171,14 +173,21 @@ pub fn to_schema_constrained_canonical_cbor(
                     .map(|block| {
                         canonical_map(vec![
                             (
+                                Value::Text("payload_schema_version".into()),
+                                Value::Integer(block.payload_schema_version.into()),
+                            ),
+                            (
                                 Value::Text("block_id".into()),
                                 Value::Integer(block.block_id.into()),
+                            ),
+                            (
+                                Value::Text("nonce".into()),
+                                Value::Bytes(block.nonce.to_vec()),
                             ),
                             (
                                 Value::Text("ciphertext".into()),
                                 Value::Bytes(block.ciphertext.clone()),
                             ),
-                            (Value::Text("tag".into()), Value::Bytes(block.tag.to_vec())),
                         ])
                     })
                     .collect::<Result<Vec<_>, _>>()?,
@@ -245,11 +254,11 @@ fn validate_policy_shape(claims: &PolicyClaims) -> Result<(), LicenseError> {
             return Err(LicenseError::PolicyDecodeFailed);
         }
 
-        if claims
-            .protected_payload
-            .iter()
-            .any(|block| block.ciphertext.is_empty() || block.ciphertext.len() > 4096)
-        {
+        if claims.protected_payload.iter().any(|block| {
+            block.payload_schema_version != PAYLOAD_SCHEMA_VERSION
+                || block.ciphertext.len() <= 16
+                || block.ciphertext.len() > 4096 + 16
+        }) {
             return Err(LicenseError::PolicyDecodeFailed);
         }
     }
@@ -296,6 +305,71 @@ mod bytes_16 {
         D: Deserializer<'de>,
     {
         deserializer.deserialize_bytes(ByteArrayVisitor::<16>)
+    }
+
+    struct ByteArrayVisitor<const N: usize>;
+
+    impl<'de, const N: usize> Visitor<'de> for ByteArrayVisitor<N> {
+        type Value = [u8; N];
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(formatter, "a CBOR byte string with exactly {N} bytes")
+        }
+
+        fn visit_bytes<E>(self, value: &[u8]) -> Result<Self::Value, E>
+        where
+            E: Error,
+        {
+            value
+                .try_into()
+                .map_err(|_| E::invalid_length(value.len(), &self))
+        }
+
+        fn visit_byte_buf<E>(self, value: Vec<u8>) -> Result<Self::Value, E>
+        where
+            E: Error,
+        {
+            self.visit_bytes(&value)
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut out = [0u8; N];
+
+            for slot in &mut out {
+                *slot = seq
+                    .next_element()?
+                    .ok_or_else(|| A::Error::invalid_length(0, &self))?;
+            }
+
+            if seq.next_element::<u8>()?.is_some() {
+                return Err(A::Error::invalid_length(N + 1, &self));
+            }
+
+            Ok(out)
+        }
+    }
+}
+
+mod bytes_12 {
+    use serde::de::{Error, SeqAccess, Visitor};
+    use serde::{Deserializer, Serializer};
+    use std::fmt;
+
+    pub fn serialize<S>(value: &[u8; 12], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bytes(value)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 12], D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_bytes(ByteArrayVisitor::<12>)
     }
 
     struct ByteArrayVisitor<const N: usize>;
@@ -492,19 +566,22 @@ mod tests {
             executable_hash: [0x33; 32],
             protected_payload: vec![
                 ProtectedPayloadBlock {
+                    payload_schema_version: 2,
                     block_id: 1,
-                    ciphertext: b"one".to_vec(),
-                    tag: [0x55; 32],
+                    nonce: [0x31; 12],
+                    ciphertext: b"one ciphertext plus tag".to_vec(),
                 },
                 ProtectedPayloadBlock {
+                    payload_schema_version: 2,
                     block_id: 2,
-                    ciphertext: b"two".to_vec(),
-                    tag: [0x66; 32],
+                    nonce: [0x32; 12],
+                    ciphertext: b"two ciphertext plus tag".to_vec(),
                 },
                 ProtectedPayloadBlock {
+                    payload_schema_version: 2,
                     block_id: 3,
-                    ciphertext: b"three".to_vec(),
-                    tag: [0x77; 32],
+                    nonce: [0x33; 12],
+                    ciphertext: b"three ciphertext plus tag".to_vec(),
                 },
             ],
             runtime_constraints: RuntimeConstraints {

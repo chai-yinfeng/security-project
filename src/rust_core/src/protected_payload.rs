@@ -26,7 +26,7 @@ fn decrypt_utf8_stage(
     block_id: u64,
 ) -> Result<String, LicenseError> {
     let block = find_block(claims, block_id)?;
-    let plaintext = capability.decrypt_block(block)?;
+    let plaintext = capability.decrypt_block(claims, block)?;
 
     String::from_utf8(plaintext).map_err(|_| LicenseError::RuntimeConstraintViolation)
 }

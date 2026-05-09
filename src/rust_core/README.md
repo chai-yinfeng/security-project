@@ -161,9 +161,11 @@ Current implemented fields:
 - `platform`
 - `device_fingerprint_hash`
 - `executable_hash`
+- `protected_payload`
+- `runtime_constraints`
 - `flags`
 
-Planned future extensions may add richer execution-environment constraints or metadata coverage, but the list above is the current source-of-truth schema.
+The protected payload blocks carry ChaCha20-Poly1305 ciphertext and nonce material. Runtime decryption derives HKDF-SHA256 block keys from a Keychain-backed device secret, the executable hash, and the plaintext-dependent block chain.
 
 ### RuntimeEnvironmentSnapshot
 
@@ -174,6 +176,7 @@ Represents:
 Expected contents:
 
 - live composite hardware fingerprint
+- Keychain-backed device payload key material
 - current wall-clock time
 - minimal execution-environment status
 

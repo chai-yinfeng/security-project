@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "$0")/../../.." && pwd)"
 BIN="$ROOT_DIR/artifacts/bin/license_demo"
 NEW_BLOB="$ROOT_DIR/artifacts/signed_policy/license.device_mismatch.bin"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+export COMS6424_DEVICE_KEY_HEX="${COMS6424_DEVICE_KEY_HEX:-00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff}"
 
 if ! "$PYTHON_BIN" -c "import cryptography" >/dev/null 2>&1; then
   if /opt/homebrew/anaconda3/bin/python3 -c "import cryptography" >/dev/null 2>&1; then

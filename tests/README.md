@@ -13,6 +13,7 @@ The minimum useful test set for the current implementation is:
 - signature verification succeeds with the generated issuer key and fails on modified policy bytes
 - runtime measurement is stable across patch-and-resign for the current executable model
 - host entry denies on verification failure and reaches the protected path on a valid demo binary
+- payload capability denies when the runtime device key differs from the key used during issuance
 
 ## Broader Coverage Goal
 

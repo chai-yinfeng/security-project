@@ -77,7 +77,17 @@ The protected path is no longer a single hard-coded print. The issuer now encryp
 - stage 2 sealed rule material for a protected computation
 - stage 3 final output template
 
-After all license checks pass, Rust derives a mutable `Capability` from the product id, license id, device payload key material, and executable hash. The protected payload consumes that capability block by block; each block uses a derived key and a use counter before decrypting and authenticating its ciphertext. This demonstrates the intended direction: patching a boolean branch is not enough, because the protected path depends on capability-derived material.
+After all license checks pass, Rust derives a mutable `Capability` from the product id, license id, Keychain-backed device key material, and executable hash. The protected payload consumes that capability block by block. Each block key is HKDF-SHA256-derived from the session key and the current plaintext-dependent chain hash, then decrypted with ChaCha20-Poly1305.
+
+The chain is intentionally ordered:
+
+- block 1 uses the initial chain hash derived from product id, license id, and executable hash
+- block 2 uses a chain hash that commits to block 1 plaintext
+- block 3 uses a chain hash that commits to block 2 plaintext
+
+Associated data binds every AEAD operation to the product id, license id, executable hash, block id, payload schema version, and current chain hash. This means a patched boolean branch is not enough, and a later block cannot be decrypted by skipping or replacing earlier protected plaintext.
+
+Device payload key material is no longer derived directly from `IOPlatformUUID`. The UUID remains a public node-locking fingerprint, while the payload capability uses a per-product 256-bit random secret stored in macOS Keychain. Tests can set `COMS6424_DEVICE_KEY_HEX` for deterministic automation, but the normal issue/runtime path reads or creates the Keychain secret.
 
 ## Executable Measurement
 
@@ -117,9 +127,11 @@ Runtime enforcement now checks more than the time window:
 The current verification set includes:
 
 - Rust unit tests for blob parsing, canonical policy encoding, signature verification, platform/device/executable binding, runtime constraints, Mach-O section parsing, and selected-section measurement
+- Rust unit tests for plaintext-dependent payload block ordering and AEAD associated-data rebinding
 - end-to-end pipeline smoke test
 - license section corruption test
 - device mismatch test
+- device key mismatch test
 - expired policy test
 - measured `__TEXT` content tamper test after re-signing
 - debugger/runtime-constraint simulation test
@@ -130,10 +142,11 @@ The shell smoke tests share `artifacts/bin/license_demo`, so they should be run 
 
 This pass removes the obvious C-side check-branch bypass and binds the signed license to protected Mach-O regions. The remaining realistic risks are now in the expected hardening category rather than basic demo gaps:
 
-- a sufficiently capable attacker can still patch Rust verification itself unless additional control-flow redundancy or encrypted payload material is added
+- a sufficiently capable attacker can still patch Rust verification itself, though the protected payload now requires capability-derived AEAD keys rather than only a boolean result
 - debugger detection is implemented, but anti-debugging should still be treated as a cost-increasing signal rather than a cryptographic guarantee
 - aggregate `executable_hash` is enough for enforcement but does not identify which section changed; per-section signed hashes would improve diagnostics
 - shell tests are not artifact-isolated yet
+- Keychain protects against file-copy and UUID-spoof replay, but root/user compromise can still extract or abuse the local secret
 
 ## Current Outcome
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import hmac
 import hashlib
 import os
 import subprocess
@@ -9,12 +10,15 @@ import time
 import uuid
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
 
 MAGIC = b"SLC1"
 BLOB_VERSION = 1
 POLICY_SCHEMA_VERSION = 1
+PAYLOAD_SCHEMA_VERSION = 2
 ZERO_SHA256 = bytes(32)
+KEYCHAIN_SERVICE = "coms6424.license-demo.device-key"
 MH_MAGIC_64 = 0xFEEDFACF
 LC_SEGMENT_64 = 0x19
 LC_CODE_SIGNATURE = 0x1D
@@ -40,75 +44,134 @@ def sha256_device(raw: str) -> bytes:
     return h.digest()
 
 
-def device_payload_key_material(raw: str) -> bytes:
-    h = hashlib.sha256()
-    h.update(b"COMS6424_DEVICE_PAYLOAD_KEY_V1")
-    h.update(raw.encode("utf-8"))
-    return h.digest()
+def hkdf_sha256(salt: bytes, ikm: bytes, info: bytes) -> bytes:
+    prk = hmac.new(salt, ikm, hashlib.sha256).digest()
+    return hmac.new(prk, info + b"\x01", hashlib.sha256).digest()
+
+
+def load_or_create_keychain_device_secret(product_id: str, override_hex: str | None = None) -> bytes:
+    if override_hex:
+        raw = bytes.fromhex(override_hex)
+        if len(raw) != 32:
+            raise ValueError("device key override must be exactly 32 bytes")
+        return raw
+
+    try:
+        existing = subprocess.check_output(
+            [
+                "/usr/bin/security",
+                "find-generic-password",
+                "-s",
+                KEYCHAIN_SERVICE,
+                "-a",
+                product_id,
+                "-w",
+            ],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+        raw = bytes.fromhex(existing)
+        if len(raw) == 32:
+            return raw
+    except (subprocess.CalledProcessError, FileNotFoundError, ValueError):
+        pass
+
+    secret = os.urandom(32)
+    subprocess.check_call(
+        [
+            "/usr/bin/security",
+            "add-generic-password",
+            "-U",
+            "-s",
+            KEYCHAIN_SERVICE,
+            "-a",
+            product_id,
+            "-w",
+            secret.hex(),
+        ],
+    )
+    return secret
+
+
+def device_payload_key_material(device_id: str, product_id: str, device_secret: bytes) -> bytes:
+    ikm = device_id.encode("utf-8") + b"\x00" + product_id.encode("utf-8")
+    return hkdf_sha256(
+        device_secret,
+        ikm,
+        b"COMS6424_DEVICE_PAYLOAD_KEY_V2",
+    )
 
 
 def derive_capability_session_key(
     product_id: str,
     license_id: bytes,
     device_id: str,
+    device_secret: bytes,
     executable_hash: bytes,
 ) -> bytes:
+    ikm = product_id.encode("utf-8") + b"\x00" + license_id + executable_hash
+    return hkdf_sha256(
+        device_payload_key_material(device_id, product_id, device_secret),
+        ikm,
+        b"COMS6424_CAPABILITY_SESSION_V2",
+    )
+
+
+def initial_payload_chain_hash(product_id: str, license_id: bytes, executable_hash: bytes) -> bytes:
     h = hashlib.sha256()
-    h.update(b"COMS6424_CAPABILITY_SESSION_V1")
+    h.update(b"COMS6424_PAYLOAD_CHAIN_V2")
     h.update(product_id.encode("utf-8"))
     h.update(b"\x00")
     h.update(license_id)
-    h.update(device_payload_key_material(device_id))
     h.update(executable_hash)
     return h.digest()
 
 
-def derive_block_key(session_key: bytes, block_id: int, use_counter: int) -> bytes:
+def next_payload_chain_hash(previous: bytes, plaintext: bytes) -> bytes:
     h = hashlib.sha256()
-    h.update(b"COMS6424_CAPABILITY_BLOCK_KEY_V1")
-    h.update(session_key)
-    h.update(struct.pack(">Q", block_id))
-    h.update(struct.pack(">Q", use_counter))
+    h.update(b"COMS6424_PAYLOAD_CHAIN_STEP_V2")
+    h.update(previous)
+    h.update(hashlib.sha256(plaintext).digest())
     return h.digest()
 
 
-def apply_payload_stream(block_key: bytes, block_id: int, payload: bytes) -> bytes:
-    out = bytearray(payload)
-    offset = 0
-    stream_counter = 0
+def derive_block_key(session_key: bytes, block_id: int, chain_hash: bytes) -> bytes:
+    info = b"COMS6424_PAYLOAD_BLOCK_KEY_V2"
+    info += struct.pack(">Q", block_id)
+    info += chain_hash
+    return hkdf_sha256(session_key, b"", info)
 
-    while offset < len(out):
-        h = hashlib.sha256()
-        h.update(b"COMS6424_PAYLOAD_STREAM_V1")
-        h.update(block_key)
-        h.update(struct.pack(">Q", block_id))
-        h.update(struct.pack(">Q", stream_counter))
-        stream = h.digest()
 
-        for byte in stream:
-            if offset == len(out):
-                break
-            out[offset] ^= byte
-            offset += 1
+def append_len_prefixed(payload: bytearray, value: bytes):
+    payload.extend(struct.pack(">I", len(value)))
+    payload.extend(value)
 
-        stream_counter += 1
 
+def payload_associated_data(
+    product_id: str,
+    license_id: bytes,
+    executable_hash: bytes,
+    block_id: int,
+    chain_hash: bytes,
+) -> bytes:
+    out = bytearray()
+    out.extend(b"COMS6424_PAYLOAD_AD_V2")
+    out.extend(struct.pack(">H", POLICY_SCHEMA_VERSION))
+    out.extend(struct.pack(">H", PAYLOAD_SCHEMA_VERSION))
+    out.extend(struct.pack(">H", PAYLOAD_SCHEMA_VERSION))
+    out.extend(struct.pack(">Q", block_id))
+    out.extend(chain_hash)
+    append_len_prefixed(out, product_id.encode("utf-8"))
+    out.extend(license_id)
+    out.extend(executable_hash)
     return bytes(out)
-
-
-def payload_tag(block_key: bytes, block_id: int, ciphertext: bytes) -> bytes:
-    h = hashlib.sha256()
-    h.update(b"COMS6424_PAYLOAD_TAG_V1")
-    h.update(block_key)
-    h.update(struct.pack(">Q", block_id))
-    h.update(ciphertext)
-    return h.digest()
 
 
 def build_protected_payload(
     product_id: str,
     license_id: bytes,
     device_id: str,
+    device_secret: bytes,
     executable_hash: bytes,
 ) -> list[dict]:
     plaintext_blocks = {
@@ -121,18 +184,35 @@ def build_protected_payload(
         product_id,
         license_id,
         device_id,
+        device_secret,
         executable_hash,
     )
 
     blocks = []
-    for use_counter, block_id in enumerate(sorted(plaintext_blocks), start=1):
-        block_key = derive_block_key(session_key, block_id, use_counter)
-        ciphertext = apply_payload_stream(block_key, block_id, plaintext_blocks[block_id])
+    chain_hash = initial_payload_chain_hash(product_id, license_id, executable_hash)
+    for block_id in sorted(plaintext_blocks):
+        plaintext = plaintext_blocks[block_id]
+        block_key = derive_block_key(session_key, block_id, chain_hash)
+        nonce = os.urandom(12)
+        associated_data = payload_associated_data(
+            product_id,
+            license_id,
+            executable_hash,
+            block_id,
+            chain_hash,
+        )
+        ciphertext = ChaCha20Poly1305(block_key).encrypt(
+            nonce,
+            plaintext,
+            associated_data,
+        )
         blocks.append({
+            "payload_schema_version": PAYLOAD_SCHEMA_VERSION,
             "block_id": block_id,
+            "nonce": nonce,
             "ciphertext": ciphertext,
-            "tag": payload_tag(block_key, block_id, ciphertext),
         })
+        chain_hash = next_payload_chain_hash(chain_hash, plaintext)
 
     return blocks
 
@@ -425,6 +505,10 @@ def write_public_key_rs(private_key: Ed25519PrivateKey, out_path: str):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--device-id")
+    parser.add_argument(
+        "--device-key-hex",
+        help="32-byte hex override for tests; otherwise a macOS Keychain secret is used",
+    )
     parser.add_argument("--product-id", default="coms6424.demo")
     parser.add_argument("--valid-days", type=int, default=14)
     parser.add_argument("--private-key", default="artifacts/issuer/issuer_ed25519.pem")
@@ -453,6 +537,8 @@ def main():
 
     now = int(time.time())
     device_id = args.device_id or query_device_identifier()
+    device_key_override = args.device_key_hex or os.environ.get("COMS6424_DEVICE_KEY_HEX")
+    device_secret = load_or_create_keychain_device_secret(args.product_id, device_key_override)
 
     if args.placeholder_executable_hash and args.executable_hash_hex:
         raise ValueError("choose only one executable hash override mode")
@@ -487,6 +573,7 @@ def main():
             args.product_id,
             license_id,
             device_id,
+            device_secret,
             executable_hash,
         ),
         "runtime_constraints": {
@@ -515,6 +602,7 @@ def main():
     print(f"policy_len={len(policy_cbor)}")
     print(f"signature_len={len(signature)}")
     print(f"device_id={device_id}")
+    print(f"device_key_source={'override' if device_key_override else 'keychain'}")
     print(f"executable_hash={executable_hash.hex()}")
 
     if args.patch_macho_license_section:

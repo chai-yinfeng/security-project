@@ -10,6 +10,7 @@ Priority targets:
 - non-canonical CBOR map ordering
 - signature mismatch
 - device binding mismatch
+- device key mismatch
 - executable binding mismatch
 - expired policy
 - measured `__TEXT` content tampering after re-signing
