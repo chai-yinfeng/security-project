@@ -19,8 +19,9 @@ The build-time side is offline and prepares the protected executable for one tar
 
 Responsibilities:
 
-- run a profiler on the target Mac
-- collect a composite hardware fingerprint
+- consume a target profile generated on the target Mac
+- collect or receive a composite hardware fingerprint
+- receive Keychain-derived device payload key material without receiving the raw Keychain secret
 - bind that fingerprint to a validity window and policy constraints
 - sign the policy using the offline issuer key
 - embed the signed policy/blob into the final Mach-O read-only image

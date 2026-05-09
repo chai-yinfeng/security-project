@@ -25,6 +25,7 @@ src/rust_core/target/
 # Generated artifacts
 artifacts/bin/
 artifacts/final/
+artifacts/device_profiles/
 artifacts/issuer/
 artifacts/measurements/
 artifacts/signed_policy/*.bin

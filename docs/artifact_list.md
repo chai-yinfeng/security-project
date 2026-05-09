@@ -13,7 +13,8 @@ This file lists the expected final artifacts for the proposal-aligned self-check
 
 ## Build-Time Artifacts
 
-- hardware profiler script or profiler implementation notes
+- target device profile script
+- target profile JSON examples or logs
 - offline issuer / signer implementation
 - build integration for embedding the signed policy/blob
 - reproducible build collateral and configuration

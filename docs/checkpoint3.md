@@ -89,6 +89,8 @@ Associated data binds every AEAD operation to the product id, license id, execut
 
 Device payload key material is no longer derived directly from `IOPlatformUUID`. The UUID remains a public node-locking fingerprint, while the payload capability uses a per-product 256-bit random secret stored in macOS Keychain. Tests can set `COMS6424_DEVICE_KEY_HEX` for deterministic automation, but the normal issue/runtime path reads or creates the Keychain secret.
 
+For third-party issuance, the target user first runs `scripts/profile_device.py`. The generated JSON profile contains the public device fingerprint hash and the derived device payload key material, not the raw Keychain secret. The issuer can then run `scripts/issue_license.py --device-profile ...` or `scripts/issue_for_device.sh <profile.json>` to produce a complete target-specific Mach-O binary.
+
 ## Executable Measurement
 
 The executable binding is no longer a whole-file approximation with explicit license and signature exclusions. It is now an aggregate selected-section measurement.
@@ -129,6 +131,7 @@ The current verification set includes:
 - Rust unit tests for blob parsing, canonical policy encoding, signature verification, platform/device/executable binding, runtime constraints, Mach-O section parsing, and selected-section measurement
 - Rust unit tests for plaintext-dependent payload block ordering and AEAD associated-data rebinding
 - end-to-end pipeline smoke test
+- profile-then-issue pipeline smoke test
 - license section corruption test
 - device mismatch test
 - device key mismatch test

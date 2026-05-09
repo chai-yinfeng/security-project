@@ -2,22 +2,29 @@
 set -euo pipefail
 
 # Usage:
-#   ioreg -rd1 -c IOPlatformExpertDevice | grep IOPlatformUUID
-#   ./scripts/issue_for_device.sh <IOPlatformUUID> [output_name]
+#   target user:
+#     ./scripts/profile_device.py --out artifacts/device_profiles/alice.json
+#   issuer:
+#     ./scripts/issue_for_device.sh artifacts/device_profiles/alice.json [output_name]
 #
 # Example:
-#   ./scripts/issue_for_device.sh "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE" alice_demo
+#   ./scripts/issue_for_device.sh artifacts/device_profiles/alice.json alice_demo
 #
 # Output:
 #   artifacts/final/alice_demo
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
-DEVICE_ID="${1:-}"
+DEVICE_PROFILE="${1:-}"
 OUTPUT_NAME="${2:-license_demo_for_device}"
 
-if [[ -z "$DEVICE_ID" ]]; then
-  echo "usage: $0 <IOPlatformUUID> [output_name]" >&2
+if [[ -z "$DEVICE_PROFILE" ]]; then
+  echo "usage: $0 <device_profile.json> [output_name]" >&2
+  exit 1
+fi
+
+if [[ ! -f "$DEVICE_PROFILE" ]]; then
+  echo "device profile not found: $DEVICE_PROFILE" >&2
   exit 1
 fi
 
@@ -64,7 +71,7 @@ cp "$TEMPLATE_BIN" "$FINAL_BIN"
 echo "[6/7] Issue license for target device and patch into final executable"
 
 python3 "$ROOT_DIR/scripts/issue_license.py" \
-  --device-id "$DEVICE_ID" \
+  --device-profile "$DEVICE_PROFILE" \
   --product-id "coms6424.demo" \
   --valid-days 14 \
   --executable "$FINAL_BIN" \
@@ -78,7 +85,7 @@ codesign --force --sign - "$FINAL_BIN"
 
 echo
 echo "Done."
-echo "Target device ID: $DEVICE_ID"
+echo "Target profile:   $DEVICE_PROFILE"
 echo "Final executable: $FINAL_BIN"
 echo "License blob:      $LICENSE_BLOB"
 echo

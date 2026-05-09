@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import json
 import hmac
 import hashlib
 import os
@@ -102,16 +103,64 @@ def device_payload_key_material(device_id: str, product_id: str, device_secret: 
     )
 
 
+def build_device_profile(
+    product_id: str,
+    device_id: str,
+    device_secret: bytes,
+) -> dict:
+    return {
+        "profile_schema_version": 1,
+        "product_id": product_id,
+        "platform": {
+            "os": "macos",
+            "arch": "arm64",
+        },
+        "device_id": device_id,
+        "device_fingerprint_hash": sha256_device(device_id).hex(),
+        "device_payload_key_material": device_payload_key_material(
+            device_id,
+            product_id,
+            device_secret,
+        ).hex(),
+    }
+
+
+def load_device_profile(path: str, product_id: str) -> dict:
+    with open(path, "r") as f:
+        profile = json.load(f)
+
+    if profile.get("profile_schema_version") != 1:
+        raise ValueError("unsupported device profile schema version")
+    if profile.get("product_id") != product_id:
+        raise ValueError("device profile product_id does not match requested product_id")
+
+    platform = profile.get("platform", {})
+    if platform.get("os") != "macos" or platform.get("arch") != "arm64":
+        raise ValueError("device profile platform is not supported")
+
+    fingerprint = bytes.fromhex(profile["device_fingerprint_hash"])
+    payload_key = bytes.fromhex(profile["device_payload_key_material"])
+    if len(fingerprint) != 32:
+        raise ValueError("device profile fingerprint must be 32 bytes")
+    if len(payload_key) != 32:
+        raise ValueError("device profile payload key material must be 32 bytes")
+
+    return {
+        "device_id": profile.get("device_id", "<profile>"),
+        "device_fingerprint_hash": fingerprint,
+        "device_payload_key_material": payload_key,
+    }
+
+
 def derive_capability_session_key(
     product_id: str,
     license_id: bytes,
-    device_id: str,
-    device_secret: bytes,
+    device_payload_key: bytes,
     executable_hash: bytes,
 ) -> bytes:
     ikm = product_id.encode("utf-8") + b"\x00" + license_id + executable_hash
     return hkdf_sha256(
-        device_payload_key_material(device_id, product_id, device_secret),
+        device_payload_key,
         ikm,
         b"COMS6424_CAPABILITY_SESSION_V2",
     )
@@ -170,8 +219,7 @@ def payload_associated_data(
 def build_protected_payload(
     product_id: str,
     license_id: bytes,
-    device_id: str,
-    device_secret: bytes,
+    device_payload_key: bytes,
     executable_hash: bytes,
 ) -> list[dict]:
     plaintext_blocks = {
@@ -183,8 +231,7 @@ def build_protected_payload(
     session_key = derive_capability_session_key(
         product_id,
         license_id,
-        device_id,
-        device_secret,
+        device_payload_key,
         executable_hash,
     )
 
@@ -506,6 +553,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--device-id")
     parser.add_argument(
+        "--device-profile",
+        help="JSON profile generated on the target machine by scripts/profile_device.py",
+    )
+    parser.add_argument(
         "--device-key-hex",
         help="32-byte hex override for tests; otherwise a macOS Keychain secret is used",
     )
@@ -536,9 +587,23 @@ def main():
     write_public_key_rs(private_key, args.rust_public_key_out)
 
     now = int(time.time())
-    device_id = args.device_id or query_device_identifier()
-    device_key_override = args.device_key_hex or os.environ.get("COMS6424_DEVICE_KEY_HEX")
-    device_secret = load_or_create_keychain_device_secret(args.product_id, device_key_override)
+    if args.device_profile and args.device_id:
+        raise ValueError("choose only one of --device-profile or --device-id")
+
+    if args.device_profile:
+        device_profile = load_device_profile(args.device_profile, args.product_id)
+        device_id = device_profile["device_id"]
+        device_fingerprint_hash = device_profile["device_fingerprint_hash"]
+        payload_key_material = device_profile["device_payload_key_material"]
+        device_key_source = "profile"
+    else:
+        device_id = args.device_id or query_device_identifier()
+        device_key_override = args.device_key_hex or os.environ.get("COMS6424_DEVICE_KEY_HEX")
+        device_secret = load_or_create_keychain_device_secret(args.product_id, device_key_override)
+        local_profile = build_device_profile(args.product_id, device_id, device_secret)
+        device_fingerprint_hash = bytes.fromhex(local_profile["device_fingerprint_hash"])
+        payload_key_material = bytes.fromhex(local_profile["device_payload_key_material"])
+        device_key_source = "override" if device_key_override else "keychain"
 
     if args.placeholder_executable_hash and args.executable_hash_hex:
         raise ValueError("choose only one executable hash override mode")
@@ -567,13 +632,12 @@ def main():
             "os": "macos",
             "arch": "arm64",
         },
-        "device_fingerprint_hash": sha256_device(device_id),
+        "device_fingerprint_hash": device_fingerprint_hash,
         "executable_hash": executable_hash,
         "protected_payload": build_protected_payload(
             args.product_id,
             license_id,
-            device_id,
-            device_secret,
+            payload_key_material,
             executable_hash,
         ),
         "runtime_constraints": {
@@ -602,7 +666,7 @@ def main():
     print(f"policy_len={len(policy_cbor)}")
     print(f"signature_len={len(signature)}")
     print(f"device_id={device_id}")
-    print(f"device_key_source={'override' if device_key_override else 'keychain'}")
+    print(f"device_key_source={device_key_source}")
     print(f"executable_hash={executable_hash.hex()}")
 
     if args.patch_macho_license_section:
