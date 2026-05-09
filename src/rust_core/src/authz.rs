@@ -59,6 +59,7 @@ mod tests {
             },
             device_fingerprint_hash: [2u8; 32],
             executable_hash: [3u8; 32],
+            protected_payload: Vec::new(),
             runtime_constraints: RuntimeConstraints::default(),
             flags: 0,
         }
@@ -70,6 +71,7 @@ mod tests {
             arch: "arm64",
             now_unix,
             device_fingerprint_hash: [2u8; 32],
+            device_key_material: [4u8; 32],
             executable_hash: [3u8; 32],
             debugger_attached: false,
             dyld_environment_present: false,

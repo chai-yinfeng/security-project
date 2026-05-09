@@ -4,10 +4,17 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/../../.." && pwd)"
 BIN="$ROOT_DIR/artifacts/bin/license_demo"
 NEW_BLOB="$ROOT_DIR/artifacts/signed_policy/license.expired.bin"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+
+if ! "$PYTHON_BIN" -c "import cryptography" >/dev/null 2>&1; then
+  if /opt/homebrew/anaconda3/bin/python3 -c "import cryptography" >/dev/null 2>&1; then
+    PYTHON_BIN="/opt/homebrew/anaconda3/bin/python3"
+  fi
+fi
 
 "$ROOT_DIR/scripts/build_pipeline.sh" >/tmp/coms6424_expired_build.log
 
-python3 "$ROOT_DIR/scripts/issue_license.py" \
+"$PYTHON_BIN" "$ROOT_DIR/scripts/issue_license.py" \
   --executable "$BIN" \
   --out "$NEW_BLOB" \
   --rust-public-key-out "$ROOT_DIR/src/rust_core/src/issuer_public_key.rs" \

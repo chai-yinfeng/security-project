@@ -40,6 +40,103 @@ def sha256_device(raw: str) -> bytes:
     return h.digest()
 
 
+def device_payload_key_material(raw: str) -> bytes:
+    h = hashlib.sha256()
+    h.update(b"COMS6424_DEVICE_PAYLOAD_KEY_V1")
+    h.update(raw.encode("utf-8"))
+    return h.digest()
+
+
+def derive_capability_session_key(
+    product_id: str,
+    license_id: bytes,
+    device_id: str,
+    executable_hash: bytes,
+) -> bytes:
+    h = hashlib.sha256()
+    h.update(b"COMS6424_CAPABILITY_SESSION_V1")
+    h.update(product_id.encode("utf-8"))
+    h.update(b"\x00")
+    h.update(license_id)
+    h.update(device_payload_key_material(device_id))
+    h.update(executable_hash)
+    return h.digest()
+
+
+def derive_block_key(session_key: bytes, block_id: int, use_counter: int) -> bytes:
+    h = hashlib.sha256()
+    h.update(b"COMS6424_CAPABILITY_BLOCK_KEY_V1")
+    h.update(session_key)
+    h.update(struct.pack(">Q", block_id))
+    h.update(struct.pack(">Q", use_counter))
+    return h.digest()
+
+
+def apply_payload_stream(block_key: bytes, block_id: int, payload: bytes) -> bytes:
+    out = bytearray(payload)
+    offset = 0
+    stream_counter = 0
+
+    while offset < len(out):
+        h = hashlib.sha256()
+        h.update(b"COMS6424_PAYLOAD_STREAM_V1")
+        h.update(block_key)
+        h.update(struct.pack(">Q", block_id))
+        h.update(struct.pack(">Q", stream_counter))
+        stream = h.digest()
+
+        for byte in stream:
+            if offset == len(out):
+                break
+            out[offset] ^= byte
+            offset += 1
+
+        stream_counter += 1
+
+    return bytes(out)
+
+
+def payload_tag(block_key: bytes, block_id: int, ciphertext: bytes) -> bytes:
+    h = hashlib.sha256()
+    h.update(b"COMS6424_PAYLOAD_TAG_V1")
+    h.update(block_key)
+    h.update(struct.pack(">Q", block_id))
+    h.update(ciphertext)
+    return h.digest()
+
+
+def build_protected_payload(
+    product_id: str,
+    license_id: bytes,
+    device_id: str,
+    executable_hash: bytes,
+) -> list[dict]:
+    plaintext_blocks = {
+        1: b"phase 1 defused: handshake wire matched the licensed silicon",
+        2: b"phase 2 rulebook: fibonacci wires; rotate=5; alpha=7; beta=11; gamma=13; checksum=0x6424",
+        3: b"phase 3 defused: the secret stage unlocks the protected path",
+    }
+
+    session_key = derive_capability_session_key(
+        product_id,
+        license_id,
+        device_id,
+        executable_hash,
+    )
+
+    blocks = []
+    for use_counter, block_id in enumerate(sorted(plaintext_blocks), start=1):
+        block_key = derive_block_key(session_key, block_id, use_counter)
+        ciphertext = apply_payload_stream(block_key, block_id, plaintext_blocks[block_id])
+        blocks.append({
+            "block_id": block_id,
+            "ciphertext": ciphertext,
+            "tag": payload_tag(block_key, block_id, ciphertext),
+        })
+
+    return blocks
+
+
 def sha256_file_measurement(path: str, embedded_blob_path: str | None = None) -> bytes:
     with open(path, "rb") as f:
         payload = f.read()
@@ -372,10 +469,11 @@ def main():
             embedded_blob_path=args.embedded_blob_path,
         )
 
+    license_id = uuid.uuid4().bytes
     policy = {
         "schema_version": POLICY_SCHEMA_VERSION,
         "product_id": args.product_id,
-        "license_id": uuid.uuid4().bytes,
+        "license_id": license_id,
         "issued_at_unix": now,
         "not_before_unix": now,
         "not_after_unix": now + args.valid_days * 24 * 3600,
@@ -385,6 +483,12 @@ def main():
         },
         "device_fingerprint_hash": sha256_device(device_id),
         "executable_hash": executable_hash,
+        "protected_payload": build_protected_payload(
+            args.product_id,
+            license_id,
+            device_id,
+            executable_hash,
+        ),
         "runtime_constraints": {
             "deny_debugger_attached": True,
             "deny_dyld_environment": True,

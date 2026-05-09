@@ -1,10 +1,12 @@
 use crate::authz;
 use crate::binding;
+use crate::capability::Capability;
 use crate::crypto;
 use crate::embedded;
 use crate::env;
 use crate::error::LicenseError;
 use crate::policy;
+use crate::protected_payload;
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -20,8 +22,8 @@ pub extern "C" fn license_check() -> LicenseDecision {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn licensed_entry() -> i32 {
-    match std::panic::catch_unwind(check_impl) {
-        Ok(Ok(())) => protected_main(),
+    match std::panic::catch_unwind(licensed_entry_impl) {
+        Ok(Ok(())) => 0,
         _ => {
             eprintln!("license denied");
             1
@@ -36,12 +38,23 @@ fn collapse_check_result(result: std::thread::Result<Result<(), LicenseError>>) 
     }
 }
 
-fn protected_main() -> i32 {
-    println!("protected path entered");
-    0
+fn licensed_entry_impl() -> Result<(), LicenseError> {
+    let verified = verify_impl()?;
+    let mut capability = Capability::from_verified_context(&verified.claims, &verified.runtime);
+
+    protected_payload::run(&mut capability, &verified.claims)
 }
 
 fn check_impl() -> Result<(), LicenseError> {
+    verify_impl().map(|_| ())
+}
+
+struct VerifiedContext {
+    claims: policy::PolicyClaims,
+    runtime: env::RuntimeEnvironment,
+}
+
+fn verify_impl() -> Result<VerifiedContext, LicenseError> {
     let blob = embedded::embedded_policy_blob()?;
 
     let signed_blob = policy::decode_signed_policy_blob(&blob.bytes)?;
@@ -59,7 +72,7 @@ fn check_impl() -> Result<(), LicenseError> {
     authz::verify_time_window(&claims, &runtime)?;
     authz::verify_runtime_constraints(&claims, &runtime)?;
 
-    Ok(())
+    Ok(VerifiedContext { claims, runtime })
 }
 
 #[cfg(test)]

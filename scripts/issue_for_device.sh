@@ -21,7 +21,7 @@ if [[ -z "$DEVICE_ID" ]]; then
   exit 1
 fi
 
-TEMPLATE_BIN="$ROOT_DIR/artifacts/bin/license_demo"
+TEMPLATE_BIN="$ROOT_DIR/artifacts/bin/license_demo.template"
 FINAL_DIR="$ROOT_DIR/artifacts/final"
 FINAL_BIN="$FINAL_DIR/$OUTPUT_NAME"
 

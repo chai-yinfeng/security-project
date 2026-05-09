@@ -113,6 +113,7 @@ The current canonical CBOR policy includes these fields:
 - `platform`
 - `device_fingerprint_hash`
 - `executable_hash`
+- `protected_payload`
 - `runtime_constraints`
 - `flags`
 
@@ -145,6 +146,24 @@ Its purpose is to detect:
 - tampering with the embedded policy/blob
 - rebinding the same policy to a different executable image
 - unauthorized recomposition of policy and program image
+
+## Protected Payload Blocks
+
+The signed policy may carry encrypted protected payload blocks. The current implementation uses three blocks:
+
+- block 1: capability acceptance feedback
+- block 2: sealed rule/config material used for a protected computation
+- block 3: final protected output template
+
+Each block contains:
+
+- `block_id`
+- `ciphertext`
+- `tag`
+
+The issuer encrypts these blocks after deriving a session capability from the product id, license id, device payload key material, and executable hash. Runtime verification must succeed before Rust can derive the same capability and decrypt blocks in order. The block key derivation includes a mutable use counter, so the capability is consumed progressively instead of acting like a static boolean.
+
+This is intentionally data/rules/template encryption rather than dynamic native-code decryption. It prevents straightforward static recovery of the protected output and sealed rules while avoiding the complexity of writable/executable memory, instruction cache management, and macOS code-signing conflicts.
 
 ## Execution-Environment Constraints
 

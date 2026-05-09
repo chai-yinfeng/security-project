@@ -57,6 +57,7 @@ The signed CBOR policy now includes:
 - `platform`
 - `device_fingerprint_hash`
 - `executable_hash`
+- `protected_payload`
 - `runtime_constraints`
 - `flags`
 
@@ -67,6 +68,16 @@ The signed CBOR policy now includes:
 - `require_valid_code_signature`
 
 These fields are covered by the Ed25519 signature because the signature remains over the canonical CBOR policy bytes.
+
+## Capability-Protected Payload
+
+The protected path is no longer a single hard-coded print. The issuer now encrypts three signed policy payload blocks:
+
+- stage 1 feedback: capability acceptance
+- stage 2 sealed rule material for a protected computation
+- stage 3 final output template
+
+After all license checks pass, Rust derives a mutable `Capability` from the product id, license id, device payload key material, and executable hash. The protected payload consumes that capability block by block; each block uses a derived key and a use counter before decrypting and authenticating its ciphertext. This demonstrates the intended direction: patching a boolean branch is not enough, because the protected path depends on capability-derived material.
 
 ## Executable Measurement
 

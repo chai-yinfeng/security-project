@@ -6,7 +6,7 @@ OUTPUT="$("$ROOT_DIR/scripts/build_pipeline.sh")"
 
 printf '%s\n' "$OUTPUT"
 
-if [[ "$OUTPUT" != *"protected path entered"* ]]; then
+if [[ "$OUTPUT" != *"bomb defused: capability chain consumed 3 encrypted stages"* ]]; then
   echo "pipeline smoke test failed: protected path was not reached" >&2
   exit 1
 fi

@@ -3,10 +3,17 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/../../.." && pwd)"
 BIN="$ROOT_DIR/artifacts/bin/license_demo"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+
+if ! "$PYTHON_BIN" -c "import cryptography" >/dev/null 2>&1; then
+  if /opt/homebrew/anaconda3/bin/python3 -c "import cryptography" >/dev/null 2>&1; then
+    PYTHON_BIN="/opt/homebrew/anaconda3/bin/python3"
+  fi
+fi
 
 "$ROOT_DIR/scripts/build_pipeline.sh" >/tmp/coms6424_pipeline_build.log
 
-python3 - "$ROOT_DIR" "$BIN" <<'PY'
+"$PYTHON_BIN" - "$ROOT_DIR" "$BIN" <<'PY'
 from pathlib import Path
 import sys
 

@@ -21,6 +21,8 @@ pub struct PolicyClaims {
     #[serde(with = "bytes_32")]
     pub executable_hash: [u8; 32],
     #[serde(default)]
+    pub protected_payload: Vec<ProtectedPayloadBlock>,
+    #[serde(default)]
     pub runtime_constraints: RuntimeConstraints,
     pub flags: u64,
 }
@@ -36,6 +38,15 @@ pub struct RuntimeConstraints {
     pub deny_debugger_attached: bool,
     pub deny_dyld_environment: bool,
     pub require_valid_code_signature: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProtectedPayloadBlock {
+    pub block_id: u64,
+    #[serde(with = "bytes_vec")]
+    pub ciphertext: Vec<u8>,
+    #[serde(with = "bytes_32")]
+    pub tag: [u8; 32],
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -152,6 +163,28 @@ pub fn to_schema_constrained_canonical_cbor(
             Value::Bytes(claims.executable_hash.to_vec()),
         ),
         (
+            Value::Text("protected_payload".into()),
+            Value::Array(
+                claims
+                    .protected_payload
+                    .iter()
+                    .map(|block| {
+                        canonical_map(vec![
+                            (
+                                Value::Text("block_id".into()),
+                                Value::Integer(block.block_id.into()),
+                            ),
+                            (
+                                Value::Text("ciphertext".into()),
+                                Value::Bytes(block.ciphertext.clone()),
+                            ),
+                            (Value::Text("tag".into()), Value::Bytes(block.tag.to_vec())),
+                        ])
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+        ),
+        (
             Value::Text("runtime_constraints".into()),
             canonical_map(vec![
                 (
@@ -198,6 +231,27 @@ fn validate_policy_shape(claims: &PolicyClaims) -> Result<(), LicenseError> {
 
     if claims.platform.arch != "arm64" && claims.platform.arch != "aarch64" {
         return Err(LicenseError::UnsupportedPlatform);
+    }
+
+    if !claims.protected_payload.is_empty() {
+        let mut ids: Vec<u64> = claims
+            .protected_payload
+            .iter()
+            .map(|block| block.block_id)
+            .collect();
+        ids.sort_unstable();
+
+        if ids != [1, 2, 3] {
+            return Err(LicenseError::PolicyDecodeFailed);
+        }
+
+        if claims
+            .protected_payload
+            .iter()
+            .any(|block| block.ciphertext.is_empty() || block.ciphertext.len() > 4096)
+        {
+            return Err(LicenseError::PolicyDecodeFailed);
+        }
     }
 
     Ok(())
@@ -355,11 +409,68 @@ mod bytes_32 {
     }
 }
 
+mod bytes_vec {
+    use serde::de::{Error, SeqAccess, Visitor};
+    use serde::{Deserializer, Serializer};
+    use std::fmt;
+
+    pub fn serialize<S>(value: &[u8], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bytes(value)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_bytes(ByteVecVisitor)
+    }
+
+    struct ByteVecVisitor;
+
+    impl<'de> Visitor<'de> for ByteVecVisitor {
+        type Value = Vec<u8>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(formatter, "a CBOR byte string")
+        }
+
+        fn visit_bytes<E>(self, value: &[u8]) -> Result<Self::Value, E>
+        where
+            E: Error,
+        {
+            Ok(value.to_vec())
+        }
+
+        fn visit_byte_buf<E>(self, value: Vec<u8>) -> Result<Self::Value, E>
+        where
+            E: Error,
+        {
+            Ok(value)
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut out = Vec::new();
+
+            while let Some(byte) = seq.next_element()? {
+                out.push(byte);
+            }
+
+            Ok(out)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        PlatformClaims, PolicyClaims, RuntimeConstraints, SIGNED_BLOB_MAGIC, SIGNED_BLOB_VERSION,
-        decode_and_check_canonical_policy, decode_signed_policy_blob,
+        PlatformClaims, PolicyClaims, ProtectedPayloadBlock, RuntimeConstraints, SIGNED_BLOB_MAGIC,
+        SIGNED_BLOB_VERSION, decode_and_check_canonical_policy, decode_signed_policy_blob,
         to_schema_constrained_canonical_cbor,
     };
     use crate::error::LicenseError;
@@ -379,6 +490,23 @@ mod tests {
             },
             device_fingerprint_hash: [0x22; 32],
             executable_hash: [0x33; 32],
+            protected_payload: vec![
+                ProtectedPayloadBlock {
+                    block_id: 1,
+                    ciphertext: b"one".to_vec(),
+                    tag: [0x55; 32],
+                },
+                ProtectedPayloadBlock {
+                    block_id: 2,
+                    ciphertext: b"two".to_vec(),
+                    tag: [0x66; 32],
+                },
+                ProtectedPayloadBlock {
+                    block_id: 3,
+                    ciphertext: b"three".to_vec(),
+                    tag: [0x77; 32],
+                },
+            ],
             runtime_constraints: RuntimeConstraints {
                 deny_debugger_attached: true,
                 deny_dyld_environment: true,

@@ -10,6 +10,7 @@ pub struct RuntimeEnvironment {
     pub arch: &'static str,
     pub now_unix: u64,
     pub device_fingerprint_hash: [u8; 32],
+    pub device_key_material: [u8; 32],
     pub executable_hash: [u8; 32],
     pub debugger_attached: bool,
     pub dyld_environment_present: bool,
@@ -27,6 +28,7 @@ pub fn collect_runtime_environment() -> Result<RuntimeEnvironment, LicenseError>
 
     let raw_device_id = query_device_identifier()?;
     let device_fingerprint_hash = hash_device_identifier(&raw_device_id);
+    let device_key_material = derive_device_key_material(&raw_device_id);
 
     let executable_hash = hash_current_executable()?;
     let debugger_attached = debugger_attached();
@@ -38,6 +40,7 @@ pub fn collect_runtime_environment() -> Result<RuntimeEnvironment, LicenseError>
         arch,
         now_unix,
         device_fingerprint_hash,
+        device_key_material,
         executable_hash,
         debugger_attached,
         dyld_environment_present,
@@ -111,6 +114,15 @@ fn hash_device_identifier(raw: &str) -> [u8; 32] {
     let mut hasher = Sha256::new();
 
     hasher.update(b"COMS6424_DEVICE_FINGERPRINT_V1");
+    hasher.update(raw.as_bytes());
+
+    hasher.finalize().into()
+}
+
+fn derive_device_key_material(raw: &str) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+
+    hasher.update(b"COMS6424_DEVICE_PAYLOAD_KEY_V1");
     hasher.update(raw.as_bytes());
 
     hasher.finalize().into()
