@@ -47,7 +47,3 @@ venv/
 # C/C++ tooling
 compile_commands.json
 .cache/
-
-# Large/generated experiment outputs should be summarized in results/processed.
-results/raw/*
-!results/raw/.gitkeep

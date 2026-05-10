@@ -2,16 +2,6 @@
 
 This repository is organized for Option 2: designing a self-checking software enforcement system for macOS on Apple Silicon (ARM64).
 
-## Immediate Goal
-
-Prepare Checkpoint 1 for Monday, April 20, 2026:
-
-- threat model
-- detailed system architecture
-- step-by-step project plan and milestones
-- final artifact list
-- collaboration plan and responsibilities
-
 ## Working Direction
 
 The project should treat enforcement as a protected subsystem compiled together with a host application. The design should defend both:
@@ -25,22 +15,20 @@ The current design pass is intentionally scoped to macOS on Apple Silicon. The p
 
 - `docs/`: threat model, architecture, checkpoint material, and design notes
 - `include/`: public interface contracts
-- `src/`: source placeholders and ownership notes
-- `tests/`: unit and security tests
+- `scripts/`: profile, issuance, build, and reproduction helpers
+- `src/`: C host entry and Rust enforcement core
+- `tests/`: integration, tamper, and Rust unit coverage
 - `eval/`: evaluation harnesses, microbenchmarks, and attack experiments
-- `results/`: raw and processed experiment outputs
-- `scripts/`: build, test, analysis, and reproduction helpers
-- `report/`: final written report sources
-- `slides/`: presentation or demo material
-- `logs/gemini/`: required generative AI logs
+- `artifacts/`: generated binaries, policies, device profiles, and issuer keys; ignored by Git
 
-## Suggested First Implementation Scope
+## Implemented Scope
 
-1. Freeze the embedded policy/blob layout and interface contracts.
-2. Implement the build-time profiler, issuer, signer, and embedding workflow.
-3. Implement the Rust core layers for embedded-policy reading, runtime environment query, verification, and authorization.
-4. Integrate the Rust core with the C host so the protected path is concrete.
-5. Add relocation, clock-tampering, tampering, and timing-oriented evaluation.
+1. Mach-O `__TEXT,__license` embedding and patching.
+2. Ed25519-signed canonical CBOR policy.
+3. Platform, device, executable image, time-window, code-signature, DYLD, and debugger constraints.
+4. Keychain-backed device key material with target profile based issuance.
+5. HKDF-SHA256 and ChaCha20-Poly1305 protected payload blocks with plaintext-dependent chaining.
+6. Integration and tamper smoke tests for the main positive and negative paths.
 
 ## Reproducibility Rule
 
