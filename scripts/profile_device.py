@@ -25,12 +25,15 @@ def main():
         args.product_id,
         device_key_override,
     )
-    se_public_key = issue_license.query_se_public_key()
+    se_result = issue_license.query_se_key()
+    se_public_key = se_result[0] if se_result else None
+    se_key_data = se_result[1] if se_result else None
     profile = issue_license.build_device_profile(
         args.product_id,
         device_id,
         device_secret,
         se_public_key,
+        se_key_data,
     )
 
     out_path = Path(args.out)

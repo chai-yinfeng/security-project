@@ -42,13 +42,22 @@ mkdir -p "$ROOT_DIR/artifacts/bin" \
 
 mkdir -p "$ROOT_DIR/artifacts/obj"
 
+SE_PUBKEY=$(python3 -c "import json,sys; p=json.load(open(sys.argv[1])); print(p.get('device_se_public_key',''))" "$DEVICE_PROFILE")
+SE_KEYDATA=$(python3 -c "import json,sys; p=json.load(open(sys.argv[1])); print(p.get('device_se_key_data',''))" "$DEVICE_PROFILE")
+
+SE_ARGS=()
+if [ -n "$SE_PUBKEY" ]; then
+  SE_ARGS+=(--se-public-key-hex "$SE_PUBKEY" --se-key-data-hex "$SE_KEYDATA")
+fi
+
 echo "[1/7] Generate placeholder license for initial Rust build"
 
 python3 "$ROOT_DIR/scripts/issue_license.py" \
   --executable "$TEMPLATE_BIN" \
   --out "$ROOT_DIR/artifacts/signed_policy/license.bin" \
   --rust-public-key-out "$ROOT_DIR/src/rust_core/src/issuer_public_key.rs" \
-  --placeholder-executable-hash
+  --placeholder-executable-hash \
+  "${SE_ARGS[@]}"
 
 echo "[2/7] Build Rust core"
 
