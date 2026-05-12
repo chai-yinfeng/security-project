@@ -63,7 +63,10 @@ fn verify_impl() -> Result<VerifiedContext, LicenseError> {
 
     let claims = policy::decode_and_check_canonical_policy(signed_blob.policy_cbor)?;
 
-    let runtime = env::collect_runtime_environment(&claims.product_id)?;
+    let runtime = env::collect_runtime_environment(
+        &claims.product_id,
+        &claims.device_se_key_data,
+    )?;
 
     binding::verify_platform(&claims, &runtime)?;
     binding::verify_device_binding(&claims, &runtime)?;

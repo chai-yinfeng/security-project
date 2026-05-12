@@ -35,7 +35,10 @@ device_secret = issue_license.load_or_create_keychain_device_secret(
     product_id,
     os.environ.get("COMS6424_DEVICE_KEY_HEX"),
 )
-profile = issue_license.build_device_profile(product_id, device_id, device_secret)
+se_result = issue_license.query_se_key()
+se_public_key = se_result[0] if se_result else None
+se_key_data = se_result[1] if se_result else None
+profile = issue_license.build_device_profile(product_id, device_id, device_secret, se_public_key, se_key_data)
 executable_hash = issue_license.sha256_file_measurement(binary)
 license_id = uuid.uuid4().bytes
 now = int(time.time())
@@ -58,12 +61,15 @@ policy = {
     "not_after_unix": now + 14 * 24 * 3600,
     "platform": {"os": "macos", "arch": "arm64"},
     "device_fingerprint_hash": bytes.fromhex(profile["device_fingerprint_hash"]),
+    "device_se_public_key": se_public_key if se_public_key else b"",
+    "device_se_key_data": se_key_data if se_key_data else b"",
     "executable_hash": executable_hash,
     "protected_payload": protected_payload,
     "runtime_constraints": {
         "deny_debugger_attached": True,
         "deny_dyld_environment": True,
         "require_valid_code_signature": True,
+        "max_clock_skew_seconds": 60,
     },
     "flags": 0,
 }

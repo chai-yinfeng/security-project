@@ -179,7 +179,7 @@ mod tests {
     use super::{
         Capability, derive_block_key, initial_chain_hash, next_chain_hash, payload_associated_data,
     };
-    use crate::env::RuntimeEnvironment;
+    use crate::env::{RuntimeEnvironment, SeChallengeResponse};
     use crate::policy::{
         PAYLOAD_SCHEMA_VERSION, PlatformClaims, PolicyClaims, ProtectedPayloadBlock,
         RuntimeConstraints,
@@ -195,9 +195,15 @@ mod tests {
             device_fingerprint_hash: [0x22; 32],
             device_key_material: [0x44; 32],
             executable_hash: [0x33; 32],
+            se_challenge_response: SeChallengeResponse {
+                challenge: [0u8; 32],
+                signature: vec![0u8; 64],
+                public_key: vec![0x04; 65],
+            },
             debugger_attached: false,
             dyld_environment_present: false,
             code_signature_valid: true,
+            ntp_unix: None,
         }
     }
 
@@ -214,6 +220,8 @@ mod tests {
                 arch: "arm64".into(),
             },
             device_fingerprint_hash: [0x22; 32],
+            device_se_public_key: vec![0x04; 65],
+            device_se_key_data: vec![0x55; 32],
             executable_hash: [0x33; 32],
             protected_payload: Vec::new(),
             runtime_constraints: RuntimeConstraints::default(),

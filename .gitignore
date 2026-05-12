@@ -28,6 +28,7 @@ artifacts/final/
 artifacts/device_profiles/
 artifacts/issuer/
 artifacts/measurements/
+artifacts/se_key.dat
 artifacts/signed_policy/*.bin
 !artifacts/signed_policy/.gitkeep
 
@@ -47,3 +48,7 @@ venv/
 # C/C++ tooling
 compile_commands.json
 .cache/
+
+# Compiled tools
+tools/se_keygen_swift
+tools/se_sign

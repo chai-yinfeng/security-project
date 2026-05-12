@@ -41,6 +41,15 @@ pub enum LicenseError {
     #[error("runtime constraint violation")]
     RuntimeConstraintViolation,
 
+    #[error("clock skew detected via NTP")]
+    ClockSkewDetected,
+
     #[error("unsupported platform")]
     UnsupportedPlatform,
+
+    #[error("secure enclave unavailable or key not found")]
+    SecureEnclaveUnavailable,
+
+    #[error("secure enclave challenge-response failed")]
+    SecureEnclaveChallengeResponseFailed,
 }

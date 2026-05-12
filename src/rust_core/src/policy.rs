@@ -19,6 +19,10 @@ pub struct PolicyClaims {
     pub platform: PlatformClaims,
     #[serde(with = "bytes_32")]
     pub device_fingerprint_hash: [u8; 32],
+    #[serde(with = "bytes_vec")]
+    pub device_se_public_key: Vec<u8>,
+    #[serde(with = "bytes_vec")]
+    pub device_se_key_data: Vec<u8>,
     #[serde(with = "bytes_32")]
     pub executable_hash: [u8; 32],
     #[serde(default)]
@@ -39,6 +43,8 @@ pub struct RuntimeConstraints {
     pub deny_debugger_attached: bool,
     pub deny_dyld_environment: bool,
     pub require_valid_code_signature: bool,
+    #[serde(default)]
+    pub max_clock_skew_seconds: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -161,6 +167,14 @@ pub fn to_schema_constrained_canonical_cbor(
             Value::Bytes(claims.device_fingerprint_hash.to_vec()),
         ),
         (
+            Value::Text("device_se_public_key".into()),
+            Value::Bytes(claims.device_se_public_key.clone()),
+        ),
+        (
+            Value::Text("device_se_key_data".into()),
+            Value::Bytes(claims.device_se_key_data.clone()),
+        ),
+        (
             Value::Text("executable_hash".into()),
             Value::Bytes(claims.executable_hash.to_vec()),
         ),
@@ -208,6 +222,10 @@ pub fn to_schema_constrained_canonical_cbor(
                     Value::Text("require_valid_code_signature".into()),
                     Value::Bool(claims.runtime_constraints.require_valid_code_signature),
                 ),
+                (
+                    Value::Text("max_clock_skew_seconds".into()),
+                    Value::Integer(claims.runtime_constraints.max_clock_skew_seconds.into()),
+                ),
             ])?,
         ),
         (
@@ -231,6 +249,10 @@ fn validate_policy_shape(claims: &PolicyClaims) -> Result<(), LicenseError> {
     }
 
     if claims.not_before_unix > claims.not_after_unix {
+        return Err(LicenseError::PolicyDecodeFailed);
+    }
+
+    if claims.device_se_public_key.len() != 65 {
         return Err(LicenseError::PolicyDecodeFailed);
     }
 
@@ -563,6 +585,8 @@ mod tests {
                 arch: "arm64".into(),
             },
             device_fingerprint_hash: [0x22; 32],
+            device_se_public_key: vec![0x04; 65],
+            device_se_key_data: vec![0x55; 32],
             executable_hash: [0x33; 32],
             protected_payload: vec![
                 ProtectedPayloadBlock {
@@ -588,6 +612,7 @@ mod tests {
                 deny_debugger_attached: true,
                 deny_dyld_environment: true,
                 require_valid_code_signature: true,
+                max_clock_skew_seconds: 0,
             },
             flags: 0,
         }
@@ -706,6 +731,14 @@ mod tests {
             (
                 Value::Text("device_fingerprint_hash".into()),
                 Value::Bytes(claims.device_fingerprint_hash.to_vec()),
+            ),
+            (
+                Value::Text("device_se_public_key".into()),
+                Value::Bytes(claims.device_se_public_key.clone()),
+            ),
+            (
+                Value::Text("device_se_key_data".into()),
+                Value::Bytes(claims.device_se_key_data.clone()),
             ),
             (
                 Value::Text("executable_hash".into()),

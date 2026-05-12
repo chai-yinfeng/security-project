@@ -45,6 +45,13 @@ def sha256_device(raw: str) -> bytes:
     return h.digest()
 
 
+def sha256_se_pubkey(public_key: bytes) -> bytes:
+    h = hashlib.sha256()
+    h.update(b"COMS6424_DEVICE_SE_PUBKEY_V1")
+    h.update(public_key)
+    return h.digest()
+
+
 def hkdf_sha256(salt: bytes, ikm: bytes, info: bytes) -> bytes:
     prk = hmac.new(salt, ikm, hashlib.sha256).digest()
     return hmac.new(prk, info + b"\x01", hashlib.sha256).digest()
@@ -107,8 +114,17 @@ def build_device_profile(
     product_id: str,
     device_id: str,
     device_secret: bytes,
+    se_public_key: bytes | None = None,
+    se_key_data: bytes | None = None,
 ) -> dict:
-    return {
+    if se_public_key:
+        fingerprint_hash = sha256_se_pubkey(se_public_key).hex()
+        payload_ikm = se_public_key + b"\x00" + product_id.encode("utf-8")
+    else:
+        fingerprint_hash = sha256_device(device_id).hex()
+        payload_ikm = device_id.encode("utf-8") + b"\x00" + product_id.encode("utf-8")
+
+    profile = {
         "profile_schema_version": 1,
         "product_id": product_id,
         "platform": {
@@ -116,13 +132,21 @@ def build_device_profile(
             "arch": "arm64",
         },
         "device_id": device_id,
-        "device_fingerprint_hash": sha256_device(device_id).hex(),
-        "device_payload_key_material": device_payload_key_material(
-            device_id,
-            product_id,
+        "device_fingerprint_hash": fingerprint_hash,
+        "device_payload_key_material": hkdf_sha256(
             device_secret,
+            (se_public_key if se_public_key else device_id.encode("utf-8"))
+            + b"\x00" + product_id.encode("utf-8"),
+            b"COMS6424_DEVICE_PAYLOAD_KEY_V2",
         ).hex(),
     }
+
+    if se_public_key:
+        profile["device_se_public_key"] = se_public_key.hex()
+    if se_key_data:
+        profile["device_se_key_data"] = se_key_data.hex()
+
+    return profile
 
 
 def load_device_profile(path: str, product_id: str) -> dict:
@@ -145,11 +169,24 @@ def load_device_profile(path: str, product_id: str) -> dict:
     if len(payload_key) != 32:
         raise ValueError("device profile payload key material must be 32 bytes")
 
-    return {
+    result = {
         "device_id": profile.get("device_id", "<profile>"),
         "device_fingerprint_hash": fingerprint,
         "device_payload_key_material": payload_key,
     }
+
+    se_pubkey_hex = profile.get("device_se_public_key")
+    if se_pubkey_hex:
+        se_pubkey = bytes.fromhex(se_pubkey_hex)
+        if len(se_pubkey) != 65:
+            raise ValueError("device profile SE public key must be 65 bytes")
+        result["device_se_public_key"] = se_pubkey
+
+    se_key_data_hex = profile.get("device_se_key_data")
+    if se_key_data_hex:
+        result["device_se_key_data"] = bytes.fromhex(se_key_data_hex)
+
+    return result
 
 
 def derive_capability_session_key(
@@ -449,6 +486,33 @@ def query_device_identifier() -> str:
     raise RuntimeError("failed to read IOPlatformUUID from ioreg output")
 
 
+def query_se_key() -> tuple[bytes, bytes] | None:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    helper = os.path.join(script_dir, "..", "tools", "se_keygen_swift")
+
+    if not os.path.exists(helper):
+        src = os.path.join(script_dir, "..", "tools", "se_keygen.swift")
+        if not os.path.exists(src):
+            return None
+        subprocess.check_call(["swiftc", src, "-o", helper])
+        subprocess.check_call([
+            "codesign", "--force", "--sign", "-", helper,
+        ])
+
+    try:
+        output = subprocess.check_output([helper], text=True).strip()
+        lines = output.splitlines()
+        if len(lines) != 2:
+            raise RuntimeError(f"se_keygen returned {len(lines)} lines, expected 2")
+        public_key = bytes.fromhex(lines[0])
+        key_data = bytes.fromhex(lines[1])
+        if len(public_key) != 65:
+            raise RuntimeError(f"se_keygen public key is {len(public_key)} bytes, expected 65")
+        return (public_key, key_data)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+
+
 def encode_uint(major_type: int, value: int) -> bytes:
     if value < 0:
         raise ValueError("value must be non-negative")
@@ -581,6 +645,14 @@ def main():
         action="store_true",
         help="use 32 zero bytes as the executable measurement",
     )
+    parser.add_argument(
+        "--se-public-key-hex",
+        help="65-byte hex SE public key (from se_keygen)",
+    )
+    parser.add_argument(
+        "--se-key-data-hex",
+        help="hex SE key data representation (from se_keygen)",
+    )
     args = parser.parse_args()
 
     private_key = load_or_create_private_key(args.private_key)
@@ -595,14 +667,20 @@ def main():
         device_id = device_profile["device_id"]
         device_fingerprint_hash = device_profile["device_fingerprint_hash"]
         payload_key_material = device_profile["device_payload_key_material"]
+        device_se_public_key = device_profile.get("device_se_public_key", b"")
+        device_se_key_data = device_profile.get("device_se_key_data", b"")
         device_key_source = "profile"
     else:
         device_id = args.device_id or query_device_identifier()
         device_key_override = args.device_key_hex or os.environ.get("COMS6424_DEVICE_KEY_HEX")
         device_secret = load_or_create_keychain_device_secret(args.product_id, device_key_override)
-        local_profile = build_device_profile(args.product_id, device_id, device_secret)
+        se_public_key = bytes.fromhex(args.se_public_key_hex) if args.se_public_key_hex else None
+        se_key_data = bytes.fromhex(args.se_key_data_hex) if args.se_key_data_hex else None
+        local_profile = build_device_profile(args.product_id, device_id, device_secret, se_public_key, se_key_data)
         device_fingerprint_hash = bytes.fromhex(local_profile["device_fingerprint_hash"])
         payload_key_material = bytes.fromhex(local_profile["device_payload_key_material"])
+        device_se_public_key = se_public_key if se_public_key else b""
+        device_se_key_data = se_key_data if se_key_data else b""
         device_key_source = "override" if device_key_override else "keychain"
 
     if args.placeholder_executable_hash and args.executable_hash_hex:
@@ -633,6 +711,8 @@ def main():
             "arch": "arm64",
         },
         "device_fingerprint_hash": device_fingerprint_hash,
+        "device_se_public_key": device_se_public_key,
+        "device_se_key_data": device_se_key_data,
         "executable_hash": executable_hash,
         "protected_payload": build_protected_payload(
             args.product_id,
@@ -644,6 +724,7 @@ def main():
             "deny_debugger_attached": True,
             "deny_dyld_environment": True,
             "require_valid_code_signature": True,
+            "max_clock_skew_seconds": 60,
         },
         "flags": 0,
     }

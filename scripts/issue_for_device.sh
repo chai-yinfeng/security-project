@@ -40,6 +40,8 @@ mkdir -p "$ROOT_DIR/artifacts/bin" \
          "$ROOT_DIR/artifacts/issuer" \
          "$ROOT_DIR/artifacts/final"
 
+mkdir -p "$ROOT_DIR/artifacts/obj"
+
 echo "[1/7] Generate placeholder license for initial Rust build"
 
 python3 "$ROOT_DIR/scripts/issue_license.py" \
@@ -52,12 +54,21 @@ echo "[2/7] Build Rust core"
 
 cargo build --manifest-path "$ROOT_DIR/src/rust_core/Cargo.toml"
 
-echo "[3/7] Link C host + Rust core into template executable"
+echo "[3/7] Link C host + Rust core + Swift SE bridge into template executable"
 
-cc \
+swiftc -c -parse-as-library "$ROOT_DIR/tools/se_bridge.swift" -o "$ROOT_DIR/artifacts/obj/se_bridge.o"
+
+cc -c \
   "$ROOT_DIR/src/host_entry/main.c" \
   -I"$ROOT_DIR/include" \
+  -o "$ROOT_DIR/artifacts/obj/main.o"
+
+swiftc \
+  "$ROOT_DIR/artifacts/obj/main.o" \
   "$ROOT_DIR/src/rust_core/target/debug/librust_core.a" \
+  "$ROOT_DIR/artifacts/obj/se_bridge.o" \
+  -framework Security \
+  -framework CoreFoundation \
   -o "$TEMPLATE_BIN"
 
 echo "[4/7] Codesign template executable"
