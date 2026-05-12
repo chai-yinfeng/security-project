@@ -14,7 +14,10 @@ The minimum useful test set for the current implementation is:
 - runtime measurement is stable across patch-and-resign for the current executable model
 - host entry denies on verification failure and reaches the protected path on a valid demo binary
 - profile-then-issue flow produces a target-specific runnable binary
+- malformed target profiles are rejected during issue
 - payload capability denies when the runtime device key differs from the key used during issuance
+- signed-but-invalid protected payload ciphertext fails at runtime
+- loader/debugger/code-signature runtime constraints deny expected negative paths
 
 ## Broader Coverage Goal
 

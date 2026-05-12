@@ -15,4 +15,5 @@ Recommended first checks:
 
 - one shell-level smoke test for `scripts/build_pipeline.sh`
 - one profile-then-issue smoke test
+- one malformed profile rejection smoke test
 - one tamper-after-build negative test
