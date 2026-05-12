@@ -35,13 +35,22 @@ pub fn verify_runtime_constraints(
         return Err(LicenseError::RuntimeConstraintViolation);
     }
 
+    if constraints.max_clock_skew_seconds > 0 {
+        if let Some(ntp_unix) = runtime.ntp_unix {
+            let skew = runtime.now_unix.abs_diff(ntp_unix);
+            if skew > constraints.max_clock_skew_seconds {
+                return Err(LicenseError::ClockSkewDetected);
+            }
+        }
+    }
+
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::{verify_runtime_constraints, verify_time_window};
-    use crate::env::RuntimeEnvironment;
+    use crate::env::{RuntimeEnvironment, SeChallengeResponse};
     use crate::error::LicenseError;
     use crate::policy::{PlatformClaims, PolicyClaims, RuntimeConstraints};
 
@@ -58,6 +67,8 @@ mod tests {
                 arch: "arm64".into(),
             },
             device_fingerprint_hash: [2u8; 32],
+            device_se_public_key: vec![0x04; 65],
+            device_se_key_data: vec![0x55; 32],
             executable_hash: [3u8; 32],
             protected_payload: Vec::new(),
             runtime_constraints: RuntimeConstraints::default(),
@@ -73,9 +84,15 @@ mod tests {
             device_fingerprint_hash: [2u8; 32],
             device_key_material: [4u8; 32],
             executable_hash: [3u8; 32],
+            se_challenge_response: SeChallengeResponse {
+                challenge: [0u8; 32],
+                signature: vec![0u8; 64],
+                public_key: vec![0x04; 65],
+            },
             debugger_attached: false,
             dyld_environment_present: false,
             code_signature_valid: true,
+            ntp_unix: Some(150),
         }
     }
 
@@ -135,5 +152,37 @@ mod tests {
             result,
             Err(LicenseError::RuntimeConstraintViolation)
         ));
+    }
+
+    #[test]
+    fn accepts_clock_within_skew_threshold() {
+        let mut claims = sample_claims();
+        claims.runtime_constraints.max_clock_skew_seconds = 60;
+        let mut runtime = sample_runtime(150);
+        runtime.ntp_unix = Some(155);
+
+        assert!(verify_runtime_constraints(&claims, &runtime).is_ok());
+    }
+
+    #[test]
+    fn rejects_clock_exceeding_skew_threshold() {
+        let mut claims = sample_claims();
+        claims.runtime_constraints.max_clock_skew_seconds = 60;
+        let mut runtime = sample_runtime(150);
+        runtime.ntp_unix = Some(300);
+
+        let result = verify_runtime_constraints(&claims, &runtime);
+
+        assert!(matches!(result, Err(LicenseError::ClockSkewDetected)));
+    }
+
+    #[test]
+    fn skips_ntp_check_when_offline() {
+        let mut claims = sample_claims();
+        claims.runtime_constraints.max_clock_skew_seconds = 60;
+        let mut runtime = sample_runtime(150);
+        runtime.ntp_unix = None;
+
+        assert!(verify_runtime_constraints(&claims, &runtime).is_ok());
     }
 }

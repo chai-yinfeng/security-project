@@ -13,6 +13,15 @@ if ! "$PYTHON_BIN" -c "import cryptography" >/dev/null 2>&1; then
   fi
 fi
 
+SE_HELPER="$ROOT_DIR/tools/se_keygen_swift"
+if [ ! -f "$SE_HELPER" ]; then
+  swiftc "$ROOT_DIR/tools/se_keygen.swift" -o "$SE_HELPER"
+  codesign --force --sign - "$SE_HELPER"
+fi
+SE_OUTPUT=$("$SE_HELPER" "$ROOT_DIR/artifacts/se_key.dat")
+SE_PUBKEY=$(echo "$SE_OUTPUT" | head -1)
+SE_KEYDATA=$(echo "$SE_OUTPUT" | tail -1)
+
 "$ROOT_DIR/scripts/build_pipeline.sh" >/tmp/coms6424_expired_build.log
 
 "$PYTHON_BIN" "$ROOT_DIR/scripts/issue_license.py" \
@@ -20,6 +29,8 @@ fi
   --out "$NEW_BLOB" \
   --rust-public-key-out "$ROOT_DIR/src/rust_core/src/issuer_public_key.rs" \
   --valid-days=-1 \
+  --se-public-key-hex "$SE_PUBKEY" \
+  --se-key-data-hex "$SE_KEYDATA" \
   --patch-macho-license-section >/tmp/coms6424_expired_issue.log
 
 codesign --force --sign - "$BIN" >/tmp/coms6424_expired_codesign.log

@@ -1,25 +1,39 @@
 use crate::error::LicenseError;
 use crate::measurement;
+use crate::secure_enclave;
 use sha2::{Digest, Sha256};
+use std::net::UdpSocket;
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const KEYCHAIN_SERVICE: &str = "coms6424.license-demo.device-key";
+
+#[derive(Debug, Clone)]
+pub struct SeChallengeResponse {
+    pub challenge: [u8; 32],
+    pub signature: Vec<u8>,
+    pub public_key: Vec<u8>,
+}
 
 #[derive(Debug, Clone)]
 pub struct RuntimeEnvironment {
     pub os: &'static str,
     pub arch: &'static str,
     pub now_unix: u64,
+    pub ntp_unix: Option<u64>,
     pub device_fingerprint_hash: [u8; 32],
     pub device_key_material: [u8; 32],
     pub executable_hash: [u8; 32],
+    pub se_challenge_response: SeChallengeResponse,
     pub debugger_attached: bool,
     pub dyld_environment_present: bool,
     pub code_signature_valid: bool,
 }
 
-pub fn collect_runtime_environment(product_id: &str) -> Result<RuntimeEnvironment, LicenseError> {
+pub fn collect_runtime_environment(
+    product_id: &str,
+    se_key_data: &[u8],
+) -> Result<RuntimeEnvironment, LicenseError> {
     let os = current_os();
     let arch = current_arch();
 
@@ -28,10 +42,22 @@ pub fn collect_runtime_environment(product_id: &str) -> Result<RuntimeEnvironmen
         .map_err(|_| LicenseError::RuntimeEnvironmentFailed)?
         .as_secs();
 
-    let raw_device_id = query_device_identifier()?;
-    let device_fingerprint_hash = hash_device_identifier(&raw_device_id);
-    let device_key_material = derive_device_key_material(&raw_device_id, product_id)?;
+    let mut challenge = [0u8; 32];
+    unsafe {
+        libc::arc4random_buf(challenge.as_mut_ptr().cast(), challenge.len());
+    }
+    let (signature, public_key) = secure_enclave::se_sign_challenge(se_key_data, &challenge)?;
+    let device_fingerprint_hash = hash_se_public_key(&public_key);
 
+    let device_key_material = derive_device_key_material_from_se(&public_key, product_id)?;
+
+    let se_challenge_response = SeChallengeResponse {
+        challenge,
+        signature,
+        public_key,
+    };
+
+    let ntp_unix = query_ntp_time();
     let executable_hash = hash_current_executable()?;
     let debugger_attached = debugger_attached();
     let dyld_environment_present = dyld_environment_present();
@@ -41,9 +67,11 @@ pub fn collect_runtime_environment(product_id: &str) -> Result<RuntimeEnvironmen
         os,
         arch,
         now_unix,
+        ntp_unix,
         device_fingerprint_hash,
         device_key_material,
         executable_hash,
+        se_challenge_response,
         debugger_attached,
         dyld_environment_present,
         code_signature_valid,
@@ -74,60 +102,20 @@ fn current_arch() -> &'static str {
     }
 }
 
-fn query_device_identifier() -> Result<String, LicenseError> {
-    #[cfg(target_os = "macos")]
-    {
-        let output = Command::new("ioreg")
-            .args(["-rd1", "-c", "IOPlatformExpertDevice"])
-            .output()
-            .map_err(|_| LicenseError::RuntimeEnvironmentFailed)?;
-
-        if !output.status.success() {
-            return Err(LicenseError::RuntimeEnvironmentFailed);
-        }
-
-        let stdout =
-            String::from_utf8(output.stdout).map_err(|_| LicenseError::RuntimeEnvironmentFailed)?;
-
-        parse_ioplatform_uuid(&stdout)
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        Err(LicenseError::UnsupportedPlatform)
-    }
-}
-
-fn parse_ioplatform_uuid(ioreg_output: &str) -> Result<String, LicenseError> {
-    for line in ioreg_output.lines() {
-        if line.contains("IOPlatformUUID") {
-            let parts: Vec<&str> = line.split('"').collect();
-
-            if parts.len() >= 4 {
-                return Ok(parts[3].to_string());
-            }
-        }
-    }
-
-    Err(LicenseError::RuntimeEnvironmentFailed)
-}
-
-fn hash_device_identifier(raw: &str) -> [u8; 32] {
+fn hash_se_public_key(public_key: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
-
-    hasher.update(b"COMS6424_DEVICE_FINGERPRINT_V1");
-    hasher.update(raw.as_bytes());
-
+    hasher.update(b"COMS6424_DEVICE_SE_PUBKEY_V1");
+    hasher.update(public_key);
     hasher.finalize().into()
 }
 
-fn derive_device_key_material(
-    raw_device_id: &str,
+fn derive_device_key_material_from_se(
+    se_public_key: &[u8],
     product_id: &str,
 ) -> Result<[u8; 32], LicenseError> {
     let secret = load_or_create_keychain_device_secret(product_id)?;
     let mut ikm = Vec::new();
-    ikm.extend_from_slice(raw_device_id.as_bytes());
+    ikm.extend_from_slice(se_public_key);
     ikm.push(0);
     ikm.extend_from_slice(product_id.as_bytes());
 
@@ -348,6 +336,29 @@ fn dyld_environment_present() -> bool {
         .any(|key| std::env::var_os(key).is_some())
 }
 
+fn query_ntp_time() -> Option<u64> {
+    const NTP_EPOCH_OFFSET: u64 = 2_208_988_800;
+    const NTP_SERVER: &str = "time.apple.com:123";
+
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.set_read_timeout(Some(Duration::from_secs(3))).ok()?;
+    socket.connect(NTP_SERVER).ok()?;
+
+    let mut request = [0u8; 48];
+    request[0] = 0x1B; // version 3, mode 3 (client)
+    socket.send(&request).ok()?;
+
+    let mut response = [0u8; 48];
+    let n = socket.recv(&mut response).ok()?;
+    if n < 48 {
+        return None;
+    }
+
+    let secs = u32::from_be_bytes([response[40], response[41], response[42], response[43]]);
+    let ntp_unix = (secs as u64).checked_sub(NTP_EPOCH_OFFSET)?;
+    Some(ntp_unix)
+}
+
 fn verify_current_executable_code_signature() -> Result<bool, LicenseError> {
     #[cfg(target_os = "macos")]
     {
@@ -369,32 +380,24 @@ fn verify_current_executable_code_signature() -> Result<bool, LicenseError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_hex_32, parse_ioplatform_uuid};
-    use crate::error::LicenseError;
+    use super::{hash_se_public_key, parse_hex_32};
 
     #[test]
-    fn parses_ioplatform_uuid_from_ioreg_output() {
-        let sample = r#"
-            | |   "IOPlatformUUID" = "F6860FD3-99A1-5C05-8C2B-946F5F0832FD"
-        "#;
+    fn se_public_key_hash_is_deterministic() {
+        let pubkey = vec![0x04; 65];
+        let hash1 = hash_se_public_key(&pubkey);
+        let hash2 = hash_se_public_key(&pubkey);
 
-        let parsed = parse_ioplatform_uuid(sample).unwrap();
-
-        assert_eq!(parsed, "F6860FD3-99A1-5C05-8C2B-946F5F0832FD");
+        assert_eq!(hash1, hash2);
     }
 
     #[test]
-    fn rejects_ioreg_output_without_uuid() {
-        let sample = r#"
-            | |   "SomeOtherField" = "value"
-        "#;
+    fn se_public_key_hash_changes_with_input() {
+        let pubkey1 = vec![0x04; 65];
+        let mut pubkey2 = vec![0x04; 65];
+        pubkey2[1] = 0xff;
 
-        let result = parse_ioplatform_uuid(sample);
-
-        assert!(matches!(
-            result,
-            Err(LicenseError::RuntimeEnvironmentFailed)
-        ));
+        assert_ne!(hash_se_public_key(&pubkey1), hash_se_public_key(&pubkey2));
     }
 
     #[test]

@@ -25,10 +25,12 @@ def main():
         args.product_id,
         device_key_override,
     )
+    se_public_key = issue_license.query_se_public_key()
     profile = issue_license.build_device_profile(
         args.product_id,
         device_id,
         device_secret,
+        se_public_key,
     )
 
     out_path = Path(args.out)
@@ -39,6 +41,7 @@ def main():
     print(f"product_id={args.product_id}")
     print(f"device_id={device_id}")
     print(f"device_key_source={'override' if device_key_override else 'keychain'}")
+    print(f"se_public_key={'present' if se_public_key else 'unavailable'}")
 
 
 if __name__ == "__main__":
